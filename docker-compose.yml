@@ -1,0 +1,29 @@
+# Standalone example: ddospot with its log files in the volume ddospot_log.
+# Start with "docker compose up -d --build", the logs are in
+# /var/log/ddospot of the container.
+services:
+  ddospot:
+    build: .
+    image: ddospot:v2
+    container_name: ddospot
+    restart: always
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 5s
+    environment:
+      - DDOSPOT_DNS_RECURSION=on
+      - DDOSPOT_CLASSIFY_SECONDS=60
+    ports:
+      - "19:19/udp"
+      - "53:53/udp"
+      - "53:53/tcp"
+      - "123:123/udp"
+      - "1900:1900/udp"
+    volumes:
+      - ddospot_log:/var/log/ddospot
+
+volumes:
+  ddospot_log:
