@@ -2,7 +2,10 @@
 package testutil
 
 import (
+	"bufio"
+	"encoding/json"
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -66,3 +69,28 @@ func (r *DNSRecorder) Close() error                { return nil }
 func (r *DNSRecorder) TsigStatus() error           { return nil }
 func (r *DNSRecorder) TsigTimersOnly(bool)         {}
 func (r *DNSRecorder) Hijack()                     {}
+
+// ReadJSON reads a file of JSON lines into one map per line and fails the
+// test on a line that is not a JSON object.
+func ReadJSON(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var out []map[string]any
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		var m map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
+			t.Fatalf("line %q: %v", sc.Text(), err)
+		}
+		out = append(out, m)
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
