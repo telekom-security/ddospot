@@ -90,9 +90,10 @@ type netEntry struct {
 
 type srcEntry struct {
 	Source
-	class    class
-	answered int
-	net      *netEntry
+	class     class
+	answered  int
+	announced bool // TargetStart was emitted, so TargetEnd is owed
+	net       *netEntry
 }
 
 type srcKey struct {
@@ -145,6 +146,7 @@ func cloneSample(s Sample) Sample {
 // Admit counts the packet and reports whether an answer of the given size may be sent.
 func (l *Limiter) Admit(p Proto, src netip.AddrPort, s Sample, datagrams, bytes int) bool {
 	addr := src.Addr().Unmap()
+	datagrams, bytes = max(datagrams, 0), max(bytes, 0)
 	var calls []func()
 	ok := func() bool {
 		l.mu.Lock()
@@ -185,6 +187,7 @@ func (l *Limiter) Admit(p Proto, src netip.AddrPort, s Sample, datagrams, bytes 
 		if e.answered >= l.cfg.PerSource {
 			if e.class != target {
 				e.class = target
+				e.announced = true
 				snap := e.Source
 				calls = append(calls, func() { l.obs.TargetStart(snap) })
 			}
@@ -226,7 +229,7 @@ func (l *Limiter) Tick() {
 			}
 		}
 		if now.Sub(e.Last) >= l.cfg.Window {
-			if e.class == target && !e.net.blocked {
+			if e.announced {
 				snap := e.Source
 				calls = append(calls, func() { l.obs.TargetEnd(snap) })
 			}
@@ -253,15 +256,12 @@ func (l *Limiter) Flush() {
 	l.mu.Lock()
 	var calls []func()
 	for _, e := range l.srcs {
-		if e.net.blocked {
-			continue
-		}
 		snap := e.Source
-		switch e.class {
-		case pending:
-			calls = append(calls, func() { l.obs.Scanner(snap) })
-		case target:
+		switch {
+		case e.announced:
 			calls = append(calls, func() { l.obs.TargetEnd(snap) })
+		case e.class == pending && !e.net.blocked:
+			calls = append(calls, func() { l.obs.Scanner(snap) })
 		}
 	}
 	for _, n := range l.nets {
