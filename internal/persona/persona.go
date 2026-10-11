@@ -86,8 +86,13 @@ var macPrefixes = [][3]byte{
 	{0xa0, 0x36, 0x9f}, // Intel
 }
 
-// Roll picks a profile and rolls the details of the host.
-func Roll(r *rand.Rand) Persona {
+// Roll picks a profile and rolls the details of the host, with the boot
+// time counted back from the system clock.
+func Roll(r *rand.Rand) Persona { return RollAt(r, time.Now()) }
+
+// RollAt is Roll with the boot time counted back from now: the same seed
+// and the same now give the same persona.
+func RollAt(r *rand.Rand, now time.Time) Persona {
 	cat := Catalog()
 	p := Persona{Profile: cat[r.Intn(len(cat))]}
 	p.Hostname = hostnames[r.Intn(len(hostnames))]
@@ -115,7 +120,7 @@ func Roll(r *rand.Rand) Persona {
 	p.SSDPPort = p.SSDP.PortMin + uint16(r.Intn(int(p.SSDP.PortMax-p.SSDP.PortMin)+1))
 
 	up := 86400 + r.Int63n(89*86400+1)
-	p.BootID = uint32(time.Now().Unix() - up)
+	p.BootID = uint32(now.Unix() - up)
 	p.ConfigID = uint32(1 + r.Intn(16777215))
 	p.RootDelay = 0.005 + r.Float64()*0.075
 	p.RootDisp = 0.01 + r.Float64()*0.11

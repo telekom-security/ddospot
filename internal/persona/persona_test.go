@@ -3,6 +3,7 @@ package persona
 import (
 	"math/rand"
 	"net/netip"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -49,11 +50,51 @@ func TestEveryProfileIsPicked(t *testing.T) {
 	}
 }
 
-func TestRollIsDeterministic(t *testing.T) {
-	a, b := Roll(rand.New(rand.NewSource(7))), Roll(rand.New(rand.NewSource(7)))
-	if a.ID != b.ID || a.Hostname != b.Hostname || a.LAN != b.LAN || a.RefID != b.RefID ||
-		strings.Join(a.UUIDs, ",") != strings.Join(b.UUIDs, ",") || a.ConfigID != b.ConfigID {
-		t.Fatal("same seed, different persona")
+func TestRollAtIsDeterministic(t *testing.T) {
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	for seed := int64(0); seed < 50; seed++ {
+		a := RollAt(rand.New(rand.NewSource(seed)), now)
+		b := RollAt(rand.New(rand.NewSource(seed)), now)
+		if !reflect.DeepEqual(a, b) {
+			t.Fatalf("%d: same seed and clock, different persona:\n%+v\n%+v", seed, a, b)
+		}
+	}
+}
+
+func TestRollAtBootTime(t *testing.T) {
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	lo, hi := now.Add(-90*24*time.Hour).Unix(), now.Add(-24*time.Hour).Unix()
+	for seed := int64(0); seed < 500; seed++ {
+		p := RollAt(rand.New(rand.NewSource(seed)), now)
+		if b := int64(p.BootID); b < lo || b > hi {
+			t.Fatalf("%d: boot %d outside [%d, %d]", seed, b, lo, hi)
+		}
+	}
+}
+
+func TestProfileFieldsAgree(t *testing.T) {
+	for _, p := range Catalog() {
+		if p.DNS.HostnameBind != (p.DNS.Software == "bind") {
+			t.Errorf("%s: software %s, hostname.bind %v", p.ID, p.DNS.Software, p.DNS.HostnameBind)
+		}
+		if p.SSDP.Kind != "minidlna" {
+			continue
+		}
+		kernel := strings.TrimPrefix(p.NTP.System, "Linux/")
+		switch {
+		case strings.HasPrefix(p.ID, "centos"):
+			// built on the host: configure takes OS_VERSION from uname -r
+			if !strings.HasPrefix(p.SSDP.Server, kernel+" ") {
+				t.Errorf("%s: kernel %s not in SERVER %q", p.ID, kernel, p.SSDP.Server)
+			}
+		case strings.HasPrefix(p.ID, "ubuntu"):
+			// distribution package: configure --with-os-version=Ubuntu
+			if !strings.HasPrefix(p.SSDP.Server, "Ubuntu ") {
+				t.Errorf("%s: SERVER %q", p.ID, p.SSDP.Server)
+			}
+		default:
+			t.Errorf("%s: no rule for the minidlna SERVER", p.ID)
+		}
 	}
 }
 
@@ -132,15 +173,19 @@ func TestTimeServers(t *testing.T) {
 	if len(timeServers) < 60 {
 		t.Fatalf("%d time servers", len(timeServers))
 	}
-	doc := []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24"), netip.MustParsePrefix("198.51.100.0/24"),
-		netip.MustParsePrefix("203.0.113.0/24"), netip.MustParsePrefix("100.64.0.0/10")}
+	var reserved []netip.Prefix
+	for _, s := range []string{"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24",
+		"192.88.99.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4"} {
+		reserved = append(reserved, netip.MustParsePrefix(s))
+	}
 	seen := map[netip.Addr]bool{}
 	for _, s := range timeServers {
 		a := s.addr
-		if !a.Is4() || !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() {
+		if !a.Is4() || !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsMulticast() ||
+			a.IsLinkLocalUnicast() || a.IsUnspecified() {
 			t.Errorf("%s is no public IPv4 address", a)
 		}
-		for _, p := range doc {
+		for _, p := range reserved {
 			if p.Contains(a) {
 				t.Errorf("%s in %s", a, p)
 			}
