@@ -109,6 +109,27 @@ func (h *host) answer(req []byte, src netip.AddrPort, now time.Time, ref func() 
 	return nil, ""
 }
 
+// modeName names the mode of a request for the log, OTHER for a mode that
+// has no name here and for a datagram too short to tell.
+func modeName(req []byte) string {
+	if len(req) == 0 {
+		return "OTHER"
+	}
+	switch req[0] & 7 {
+	case modeClient:
+		return "DATA"
+	case modeUnspec:
+		if req[0]>>3&7 == oldVersion {
+			return "DATA"
+		}
+	case modeControl:
+		return "CONTROL"
+	case modePrivate:
+		return "MONLIST"
+	}
+	return "OTHER"
+}
+
 // Server answers NTP requests within the budgets of its limiter.
 type Server struct {
 	conn *net.UDPConn
@@ -118,18 +139,24 @@ type Server struct {
 	rng   *rand.Rand
 	steps map[int64]time.Duration // reftime jitter per poll step
 	h     host
+
+	// build makes the answer to one request; a field so that a test can
+	// see when an answer is built.
+	build func(req []byte, src netip.AddrPort, now time.Time) ([][]byte, string)
 }
 
 // New returns a Server reading from conn that answers as persona p.
 func New(conn *net.UDPConn, lim *limit.Limiter, p *persona.Persona) *Server {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	return &Server{
+	s := &Server{
 		conn:  conn,
 		lim:   lim,
 		rng:   rng,
 		steps: map[int64]time.Duration{},
 		h:     newHost(p, rng, time.Now()),
 	}
+	s.build = s.answer
+	return s
 }
 
 // Serve answers datagrams until the connection is closed.
@@ -137,9 +164,17 @@ func (s *Server) Serve() error {
 	return udp.Loop(s.conn, s.handle)
 }
 
+// handle counts every datagram once. An answer is built only for a source
+// that is within its budgets; a datagram without an answer is counted with
+// no response size.
 func (s *Server) handle(req []byte, src netip.AddrPort) {
-	resp, mode := s.answer(req, src, time.Now())
+	if s.lim.Over(limit.NTP, src, false) {
+		s.count(req, src)
+		return
+	}
+	resp, mode := s.build(req, src, time.Now())
 	if resp == nil {
+		s.count(req, src)
 		return
 	}
 	sum := 0
@@ -153,6 +188,12 @@ func (s *Server) handle(req []byte, src netip.AddrPort) {
 	for _, d := range resp {
 		s.conn.WriteToUDPAddrPort(d, src)
 	}
+}
+
+// count registers a datagram that is not answered.
+func (s *Server) count(req []byte, src netip.AddrPort) {
+	sample := limit.Sample{Transport: "udp", Req: req, Fields: map[string]any{"mode": modeName(req)}}
+	s.lim.Admit(limit.NTP, src, sample, 0, 0)
 }
 
 func (s *Server) answer(req []byte, src netip.AddrPort, now time.Time) ([][]byte, string) {

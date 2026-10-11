@@ -284,7 +284,7 @@ func TestServeAnswersAfterDelay(t *testing.T) {
 	}
 }
 
-func TestServeIgnoresInvalid(t *testing.T) {
+func TestServeCountsInvalid(t *testing.T) {
 	srv, cli := testutil.UDPPair(t)
 	s := New(srv, limit.New(limit.Defaults(time.Minute), time.Now, testutil.NopObs{}), per("centos7"))
 	go s.Serve()
@@ -295,7 +295,7 @@ func TestServeIgnoresInvalid(t *testing.T) {
 			t.Fatalf("answer to %q", b)
 		}
 	}
-	// Requests without an answer take nothing from the budget.
+	// Each of them is one of the five packets of the source.
 	got := 0
 	for i := 0; i < 6; i++ {
 		cli.Write(msearch("upnp:rootdevice", "1"))
@@ -303,8 +303,8 @@ func TestServeIgnoresInvalid(t *testing.T) {
 			got++
 		}
 	}
-	if got != 5 {
-		t.Fatalf("answers %d, want 5", got)
+	if got != 2 {
+		t.Fatalf("answers %d, want 2", got)
 	}
 }
 

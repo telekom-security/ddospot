@@ -332,6 +332,10 @@ type Server struct {
 	timers map[*time.Timer]struct{}
 	closed bool
 	wg     sync.WaitGroup // pending and running answers
+
+	// answer builds the datagrams for one request; a field so that a test
+	// can see when an answer is built.
+	answer func(p *persona.Persona, r Request, now time.Time) [][]byte
 }
 
 // New returns a Server reading from conn that answers as persona p.
@@ -342,6 +346,7 @@ func New(conn *net.UDPConn, lim *limit.Limiter, p *persona.Persona) *Server {
 		p:      p,
 		rng:    rand.New(rand.NewSource(time.Now().UnixNano())),
 		timers: map[*time.Timer]struct{}{},
+		answer: Answer,
 	}
 }
 
@@ -367,18 +372,20 @@ func (s *Server) Close() {
 	s.wg.Wait()
 }
 
+// handle counts every datagram once. An answer is built only for an IPv4
+// source that is within its budgets; a datagram without an answer is
+// counted with no response size.
 func (s *Server) handle(req []byte, src netip.AddrPort) {
+	r, ok := Parse(req)
 	// minidlna listens on IPv4 only; the personas have no IPv6 address
 	// for the LOCATION of a miniupnpd answer.
-	if !src.Addr().Unmap().Is4() {
+	if !ok || !src.Addr().Unmap().Is4() || s.lim.Over(limit.SSDP, src, false) {
+		s.count(req, src, r, ok)
 		return
 	}
-	r, ok := Parse(req)
-	if !ok {
-		return
-	}
-	resp := Answer(s.p, r, time.Now())
+	resp := s.answer(s.p, r, time.Now())
 	if resp == nil {
+		s.count(req, src, r, ok)
 		return
 	}
 	sum := 0
@@ -390,6 +397,16 @@ func (s *Server) handle(req []byte, src netip.AddrPort) {
 		return
 	}
 	s.schedule(r, resp, src)
+}
+
+// count registers a datagram that is not answered; st and mx are empty
+// for one that does not parse.
+func (s *Server) count(req []byte, src netip.AddrPort, r Request, ok bool) {
+	f := map[string]any{"st": "", "mx": ""}
+	if ok {
+		f["st"], f["mx"] = r.ST, r.MXRaw
+	}
+	s.lim.Admit(limit.SSDP, src, limit.Sample{Transport: "udp", Req: req, Fields: f}, 0, 0)
 }
 
 // schedule sends resp to dst after the delay of the daemon.

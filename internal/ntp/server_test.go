@@ -60,24 +60,24 @@ func TestServeBudgetSharedAcrossModes(t *testing.T) {
 	}
 }
 
-func TestServeIgnoresUnansweredPackets(t *testing.T) {
+func TestServeCountsUnansweredPackets(t *testing.T) {
 	srv, cli := testutil.UDPPair(t)
 	lim := limit.New(limit.Defaults(time.Minute), time.Now, testutil.NopObs{})
 	go New(srv, lim, per("debian11")).Serve()
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 3; i++ {
 		if answered(t, cli, []byte("x")) {
 			t.Fatal("answer to a packet without NTP header")
 		}
 	}
-	// Packets without an answer take nothing from the budget.
+	// Each of them is one of the five packets of the source.
 	got := 0
 	for i := 0; i < 5; i++ {
 		if answered(t, cli, client(4)) {
 			got++
 		}
 	}
-	if got != 5 {
-		t.Fatalf("answers %d, want 5", got)
+	if got != 2 {
+		t.Fatalf("answers %d, want 2", got)
 	}
 }
 
