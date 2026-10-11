@@ -89,7 +89,7 @@ const (
 type netEntry struct {
 	Net
 	blocked bool
-	elem    *list.Element // in Limiter.netQ
+	elem    *list.Element // in Limiter.netQ; nil once the entry has expired
 }
 
 type srcEntry struct {
@@ -114,7 +114,9 @@ type srcKey struct {
 // and netQ by Last (an entry moves to the back on each packet), pendQ by
 // First. Tick takes entries from the front only while they are due. A
 // network is refreshed by every packet of its sources and expires after
-// them, so a source's net entry lives at least as long as the source.
+// them, so with a clock that never goes back a source's net entry lives at
+// least as long as the source. A source whose net entry has expired all
+// the same looks its network up again by prefix.
 type Limiter struct {
 	cfg     Config
 	now     func() time.Time
@@ -130,7 +132,8 @@ type Limiter struct {
 	byts    *bucket.Bucket
 }
 
-// New returns a Limiter reading time from now and reporting to obs.
+// New returns a Limiter reading time from now and reporting to obs. The
+// clock must never go back; time.Now qualifies.
 func New(cfg Config, now func() time.Time, obs Observer) *Limiter {
 	l := &Limiter{
 		cfg:  cfg,
@@ -196,13 +199,20 @@ func (l *Limiter) Over(p Proto, src netip.AddrPort, tcp bool) bool {
 	if tcp {
 		return false
 	}
-	var n *netEntry
-	if e != nil {
-		n = e.net
-	} else if n = l.nets[netOf(addr)]; n == nil {
+	n := l.liveNet(e, addr)
+	if n == nil {
 		return len(l.nets) >= l.cfg.MaxNets
 	}
 	return n.blocked || n.Packets >= uint64(l.cfg.PerNet)
+}
+
+// liveNet returns the current net entry of a UDP source (e may be nil for
+// a new source), or nil if the network has none.
+func (l *Limiter) liveNet(e *srcEntry, addr netip.Addr) *netEntry {
+	if e != nil && e.net.elem != nil {
+		return e.net
+	}
+	return l.nets[netOf(addr)]
 }
 
 // Admit counts the packet and reports whether an answer of the given size
@@ -228,23 +238,24 @@ func (l *Limiter) Admit(p Proto, src netip.AddrPort, s Sample, datagrams, bytes 
 		key := srcKey{p, addr, tcp}
 		table, capacity := l.table(tcp)
 		e := table[key]
-		if e == nil {
-			if len(table) >= capacity {
-				return false
-			}
-			var n *netEntry
-			if !tcp {
-				prefix := netOf(addr)
-				if n = l.nets[prefix]; n == nil {
-					if len(l.nets) >= l.cfg.MaxNets {
-						return false
-					}
-					n = &netEntry{Net: Net{Prefix: prefix, First: now}}
-					n.elem = l.netQ.PushBack(n)
-					l.nets[prefix] = n
+		if e == nil && len(table) >= capacity {
+			return false
+		}
+		var n *netEntry
+		if !tcp {
+			if n = l.liveNet(e, addr); n == nil {
+				if len(l.nets) >= l.cfg.MaxNets {
+					return false
 				}
+				n = &netEntry{Net: Net{Prefix: netOf(addr), First: now}}
+				n.elem = l.netQ.PushBack(n)
+				l.nets[n.Prefix] = n
+			}
+			if e == nil || e.net != n {
 				n.Sources++
 			}
+		}
+		if e == nil {
 			e = &srcEntry{
 				Source: Source{Proto: p, Addr: addr, Port: src.Port(), First: now, Sample: cloneSample(s)},
 				key:    key,
@@ -256,6 +267,7 @@ func (l *Limiter) Admit(p Proto, src netip.AddrPort, s Sample, datagrams, bytes 
 			table[key] = e
 		} else {
 			l.srcQ.MoveToBack(e.elem)
+			e.net = n
 		}
 		e.Last = now
 		e.Packets++
@@ -263,7 +275,6 @@ func (l *Limiter) Admit(p Proto, src netip.AddrPort, s Sample, datagrams, bytes 
 		if tcp {
 			return !overSource
 		}
-		n := e.net
 		n.Last = now
 		n.Packets++
 		l.netQ.MoveToBack(n.elem)
@@ -342,6 +353,7 @@ func (l *Limiter) Tick() {
 			break
 		}
 		l.netQ.Remove(f)
+		n.elem = nil
 		if n.blocked {
 			snap := n.Net
 			calls = append(calls, func() { l.obs.NetEnd(snap) })

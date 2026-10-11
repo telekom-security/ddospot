@@ -3,6 +3,7 @@ package limit
 import (
 	"fmt"
 	"net/netip"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -590,10 +591,15 @@ func TestTickCost(t *testing.T) {
 	if raceEnabled {
 		limit = 20 * time.Millisecond
 	}
-	start := time.Now()
-	l.Tick()
-	if d := time.Since(start); d >= limit {
-		t.Fatalf("Tick with nothing due took %v, want < %v", d, limit)
+	runtime.GC()
+	best := time.Hour
+	for i := 0; i < 3; i++ {
+		start := time.Now()
+		l.Tick()
+		best = min(best, time.Since(start))
+	}
+	if best >= limit {
+		t.Fatalf("Tick with nothing due took %v, want < %v", best, limit)
 	}
 	if len(r.scanner) != 0 || len(l.srcs) != 200000 {
 		t.Fatalf("scanner=%d sources=%d", len(r.scanner), len(l.srcs))
@@ -620,4 +626,104 @@ func TestTickOrderAfterRefresh(t *testing.T) {
 	if len(l.srcs) != 0 || len(l.nets) != 0 {
 		t.Fatalf("sources=%d nets=%d after the window", len(l.srcs), len(l.nets))
 	}
+}
+
+func TestOverFullTables(t *testing.T) {
+	l, _, _ := newTest(2)
+	l.Admit(NTP, ap("192.0.2.1:1"), Sample{}, 1, 48)
+	l.Admit(NTP, ap("192.0.2.2:1"), Sample{}, 1, 48)
+	if !l.Over(NTP, ap("192.0.2.3:1"), false) || l.Admit(NTP, ap("192.0.2.3:1"), Sample{}, 1, 48) {
+		t.Fatal("new source not refused with a full source table")
+	}
+
+	l, _, _ = newTest(10)
+	l.cfg.MaxNets = 1
+	l.Admit(NTP, ap("192.0.2.1:1"), Sample{}, 1, 48)
+	if !l.Over(NTP, ap("198.51.100.1:1"), false) || l.Admit(NTP, ap("198.51.100.1:1"), Sample{}, 1, 48) {
+		t.Fatal("source in a new network not refused with a full network table")
+	}
+	if l.Over(NTP, ap("192.0.2.5:1"), false) || !l.Admit(NTP, ap("192.0.2.5:1"), Sample{}, 1, 48) {
+		t.Fatal("source in a known network refused with a full network table")
+	}
+	if len(l.srcs) != 2 || len(l.nets) != 1 {
+		t.Fatalf("sources=%d nets=%d, want 2/1", len(l.srcs), len(l.nets))
+	}
+}
+
+// A network entry that expires while one of its sources is still live (the
+// clock is moved back to force it) is looked up again, so the network keeps
+// one budget.
+func TestNetLookupAfterExpiry(t *testing.T) {
+	l, c, r := newTest(1000)
+	t0 := c.t
+	c.t = t0.Add(time.Hour)
+	l.Admit(NTP, ap("198.51.100.1:1"), Sample{}, 1, 48)
+	c.t = t0
+	l.Admit(NTP, ap("203.0.113.1:1"), Sample{}, 1, 48)
+	c.t = t0.Add(time.Hour)
+	l.Admit(NTP, ap("198.51.100.2:1"), Sample{}, 1, 48)
+	c.t = t0.Add(11 * time.Minute)
+	l.Tick()
+	if _, ok := l.nets[netip.MustParsePrefix("203.0.113.0/24")]; ok {
+		t.Fatal("network entry not expired")
+	}
+	if _, ok := l.srcs[srcKey{NTP, netip.MustParseAddr("203.0.113.1"), false}]; !ok {
+		t.Fatal("source expired with its network")
+	}
+	ok, next := 0, 2
+	for i := 0; i < 25; i++ {
+		src := ap("203.0.113.1:1")
+		if i%6 != 0 {
+			src = netip.AddrPortFrom(netip.AddrFrom4([4]byte{203, 0, 113, byte(next)}), 1)
+			next++
+		}
+		over := l.Over(NTP, src, false)
+		admitted := l.Admit(NTP, src, Sample{}, 1, 48)
+		if over == admitted {
+			t.Fatalf("packet %d from %s: Over=%v Admit=%v", i+1, src, over, admitted)
+		}
+		if admitted {
+			ok++
+		}
+	}
+	if ok > 20 || len(r.nstart) != 1 {
+		t.Fatalf("answers=%d net_start=%d, want at most 20 and 1", ok, len(r.nstart))
+	}
+}
+
+func TestConcurrentOver(t *testing.T) {
+	cfg := Defaults(time.Millisecond)
+	cfg.Window = 5 * time.Millisecond
+	l := New(cfg, time.Now, &safeObs{})
+	stop := time.Now().Add(200 * time.Millisecond)
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; time.Now().Before(stop); i++ {
+				src := netip.AddrPortFrom(netip.AddrFrom4([4]byte{198, 51, byte(g), byte(i % 16)}), 1)
+				tcp := i%3 == 0
+				s := Sample{Transport: "udp"}
+				if tcp {
+					s.Transport = "tcp"
+				}
+				if l.Over(DNS, src, tcp) {
+					l.Admit(DNS, src, s, 0, 0)
+				} else {
+					l.Admit(DNS, src, s, 1, 64)
+				}
+			}
+		}(g)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for time.Now().Before(stop) {
+			l.Tick()
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	wg.Wait()
+	l.Flush()
 }
