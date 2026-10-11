@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -153,6 +155,55 @@ func TestHealthTransitions(t *testing.T) {
 	}
 }
 
+func TestHealthReport(t *testing.T) {
+	d := NewDoT(time.Now)
+	var got []string
+	d.Report = func(up bool, err error) { got = append(got, fmt.Sprint(up, err)) }
+	var fail atomic.Bool
+	d.probe = func(context.Context) error {
+		if fail.Load() {
+			return errors.New("no answer")
+		}
+		return nil
+	}
+	ctx := context.Background()
+	fail.Store(true)
+	for i := 0; i < 5; i++ { // down once, after the third
+		d.check(ctx)
+	}
+	fail.Store(false)
+	d.check(ctx)
+	d.check(ctx)
+	fail.Store(true)
+	d.check(ctx)
+	d.check(ctx)
+	d.check(ctx)
+	want := []string{"false no answer", "true <nil>", "false no answer"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("reports %q, want %q", got, want)
+	}
+}
+
+func TestRunProbesOftenWhileUnhealthy(t *testing.T) {
+	d := NewDoT(time.Now)
+	var probes atomic.Int32
+	d.probe = func(context.Context) error { probes.Add(1); return errors.New("no answer") }
+	d.interval = time.Hour
+	d.retry = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { d.Run(ctx); close(done) }()
+	deadline := time.Now().Add(time.Second)
+	for probes.Load() < 4 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	if probes.Load() < 4 {
+		t.Fatalf("probes %d while unhealthy", probes.Load())
+	}
+}
+
 func TestRunProbesAtOnce(t *testing.T) {
 	d := NewDoT(time.Now)
 	var probes atomic.Int32
@@ -189,8 +240,8 @@ func TestDoTSettings(t *testing.T) {
 		c.TLSConfig.ServerName != "dns.quad9.net" || c.TLSConfig.MinVersion != tls.VersionTLS12 || c.TLSConfig.InsecureSkipVerify {
 		t.Fatalf("%+v", c)
 	}
-	if cap(d.slots) != 64 || d.interval != 60*time.Second {
-		t.Fatalf("slots %d interval %v", cap(d.slots), d.interval)
+	if cap(d.slots) != 64 || d.interval != 60*time.Second || d.retry != 10*time.Second {
+		t.Fatalf("slots %d interval %v retry %v", cap(d.slots), d.interval, d.retry)
 	}
 	want := []string{"9.9.9.9:853", "149.112.112.112:853", "9.9.9.9:853", "149.112.112.112:853"}
 	for i, w := range want {

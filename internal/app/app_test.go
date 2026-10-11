@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -179,10 +181,10 @@ func TestDNSServerSettings(t *testing.T) {
 			t.Fatal("no NotifyStartedFunc")
 		}
 	}
-	if u.PacketConn != pc || u.UDPSize != 65535 {
+	if u.PacketConn != pc || u.UDPSize != 4096 {
 		t.Fatalf("udp server: %+v", u)
 	}
-	if tc.Listener != l || tc.ReadTimeout != 5*time.Second || tc.MaxTCPQueries != 64 {
+	if tc.Listener == l || tc.Listener.Addr() != l.Addr() || tc.ReadTimeout != 5*time.Second || tc.MaxTCPQueries != 64 {
 		t.Fatalf("tcp server: %+v", tc)
 	}
 }
@@ -226,6 +228,37 @@ func TestDNSOverTCP(t *testing.T) {
 	r, _, err := (&dns.Client{Net: "tcp", Timeout: time.Second}).Exchange(m, a.DNS)
 	if err != nil || r.Rcode != dns.RcodeSuccess {
 		t.Fatalf("%v %v", r, err)
+	}
+}
+
+func TestDNSTCPConnectionsPerAddr(t *testing.T) {
+	captureStdout(t)
+	a, _ := startApp(t, localConfig(t.TempDir()))
+	m := new(dns.Msg)
+	m.SetQuestion("version.bind.", dns.TypeTXT)
+	m.Question[0].Qclass = dns.ClassCHAOS
+	for i := 0; i < tcpConnsPerAddr; i++ {
+		co, err := dns.Dial("tcp", a.DNS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer co.Close()
+		co.SetDeadline(time.Now().Add(time.Second))
+		if err := co.WriteMsg(m); err != nil {
+			t.Fatal(err)
+		}
+		if r, err := co.ReadMsg(); err != nil || r.Rcode != dns.RcodeSuccess {
+			t.Fatalf("connection %d: %v %v", i+1, r, err)
+		}
+	}
+	c, err := net.Dial("tcp", a.DNS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("connection %d kept open: %v", tcpConnsPerAddr+1, err)
 	}
 }
 
@@ -313,6 +346,17 @@ func TestReport(t *testing.T) {
 	b.Reset()
 	report(&b, w)
 	if b.Len() != 0 {
+		t.Fatalf("%q", b.String())
+	}
+}
+
+func TestReportUpstream(t *testing.T) {
+	var b bytes.Buffer
+	reportUpstream(&b, true, nil)
+	reportUpstream(&b, false, errors.New("dial tcp 9.9.9.9:853: i/o timeout"))
+	want := "dns upstream: answering, class IN resolved\n" +
+		"dns upstream: not answering (dial tcp 9.9.9.9:853: i/o timeout), class IN answered with REFUSED\n"
+	if b.String() != want {
 		t.Fatalf("%q", b.String())
 	}
 }

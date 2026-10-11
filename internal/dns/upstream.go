@@ -26,8 +26,9 @@ const (
 	queryTime   = 2 * time.Second
 	maxInflight = 64
 	maxIdle     = 4
-	probeEvery  = 60 * time.Second
-	probeFails  = 3 // failed probes in a row before the upstream counts as down
+	probeEvery  = 60 * time.Second // while healthy
+	probeRetry  = 10 * time.Second // while unhealthy
+	probeFails  = 3                // failed probes in a row before the upstream counts as down
 	budgetRate  = 10
 	budgetBurst = 20
 )
@@ -42,12 +43,19 @@ var (
 
 // DoT is the Quad9 resolver over DNS over TLS. It keeps up to 4 idle
 // connections, sends at most 10 queries per second (burst 20) with at
-// most 64 in flight, and probes the servers every 60 s.
+// most 64 in flight, and probes the servers every 60 s while they answer
+// and every 10 s while they do not.
 type DoT struct {
+	// Report, when set before Run, is called on every change of the
+	// health: up after a good probe, down with the last error after the
+	// third failed probe in a row.
+	Report func(up bool, err error)
+
 	now      func() time.Time
 	dial     func(ctx context.Context) (*dns.Conn, error)
 	probe    func(ctx context.Context) error
-	interval time.Duration
+	interval time.Duration // between probes while healthy
+	retry    time.Duration // between probes while unhealthy
 	timeout  time.Duration
 	client   *dns.Client
 	slots    chan struct{}
@@ -58,6 +66,7 @@ type DoT struct {
 	idle   []*dns.Conn
 	next   int
 	fails  int
+	state  int8 // health last reported: 0 none yet, 1 up, -1 down
 	closed bool
 }
 
@@ -67,6 +76,7 @@ func NewDoT(now func() time.Time) *DoT {
 	d := &DoT{
 		now:      now,
 		interval: probeEvery,
+		retry:    probeRetry,
 		timeout:  queryTime,
 		client: &dns.Client{
 			Net:       "tcp-tls",
@@ -193,24 +203,39 @@ func (d *DoT) probeOnce(ctx context.Context) error {
 }
 
 // check runs one probe: a good one makes the upstream healthy, the third
-// failed one in a row makes it unhealthy.
+// failed one in a row makes it unhealthy. A change is handed to Report.
 func (d *DoT) check(ctx context.Context) {
 	err := d.probe(ctx)
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	var state int8
 	if err == nil {
 		d.fails = 0
 		d.healthy.Store(true)
-		return
-	}
-	d.fails++
-	if d.fails >= probeFails {
+		state = 1
+	} else if d.fails++; d.fails >= probeFails {
 		d.healthy.Store(false)
+		state = -1
+	}
+	changed := state != 0 && state != d.state
+	if changed {
+		d.state = state
+	}
+	d.mu.Unlock()
+	if changed && d.Report != nil {
+		d.Report(state == 1, err)
 	}
 }
 
-// Run probes at once and then every 60 s until ctx ends, then closes the
-// idle connections.
+// wait is the time until the next probe.
+func (d *DoT) wait() time.Duration {
+	if d.Healthy() {
+		return d.interval
+	}
+	return d.retry
+}
+
+// Run probes at once and then every 60 s while healthy and every 10 s
+// while not, until ctx ends; then it closes the idle connections.
 func (d *DoT) Run(ctx context.Context) {
 	defer func() {
 		d.mu.Lock()
@@ -222,7 +247,7 @@ func (d *DoT) Run(ctx context.Context) {
 		d.mu.Unlock()
 	}()
 	d.check(ctx)
-	t := time.NewTicker(d.interval)
+	t := time.NewTimer(d.wait())
 	defer t.Stop()
 	for {
 		select {
@@ -230,6 +255,7 @@ func (d *DoT) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			d.check(ctx)
+			t.Reset(d.wait())
 		}
 	}
 }

@@ -34,9 +34,11 @@ const (
 	tickEvery   = time.Second
 	reportEvery = time.Minute
 
-	udpSize        = 65535 // read buffer of the DNS server on UDP
-	tcpReadTimeout = 5 * time.Second
-	tcpQueries     = 64 // queries per TCP connection
+	udpSize         = 4096 // read buffer of the DNS server on UDP
+	tcpReadTimeout  = 5 * time.Second
+	tcpQueries      = 64  // queries per TCP connection
+	tcpConns        = 256 // open TCP connections of DNS
+	tcpConnsPerAddr = 4   // open TCP connections of DNS per address
 
 	dnsStop  = time.Second             // bound for the stop of the DNS servers
 	stopTime = 1500 * time.Millisecond // bound for the whole stop
@@ -120,10 +122,12 @@ func tcpAddr(addr string, udp *net.UDPConn) string {
 
 // newDNSServers returns the DNS servers for UDP and TCP. Both hand every
 // message that parses to h, so that all answers stay within the budgets.
+// The TCP server keeps at most tcpConns connections open, tcpConnsPerAddr
+// of them from one address.
 func newDNSServers(h dns.Handler, pc net.PacketConn, l net.Listener, started func()) (udp, tcp *dns.Server) {
 	udp = &dns.Server{PacketConn: pc, Handler: h, UDPSize: udpSize,
 		MsgAcceptFunc: dnspot.Accept, DecorateReader: dnspot.StrictReader, NotifyStartedFunc: started}
-	tcp = &dns.Server{Listener: l, Handler: h, ReadTimeout: tcpReadTimeout, MaxTCPQueries: tcpQueries,
+	tcp = &dns.Server{Listener: dnspot.LimitListener(l, tcpConns, tcpConnsPerAddr), Handler: h, ReadTimeout: tcpReadTimeout, MaxTCPQueries: tcpQueries,
 		MsgAcceptFunc: dnspot.Accept, DecorateReader: dnspot.StrictReader, NotifyStartedFunc: started}
 	return udp, tcp
 }
@@ -137,6 +141,15 @@ func report(out io.Writer, w *jsonlog.Writer) {
 	if n := w.Errors(); n > 0 {
 		fmt.Fprintf(out, "log write errors: %d\n", n)
 	}
+}
+
+// reportUpstream prints a change of the health of the DNS upstream.
+func reportUpstream(out io.Writer, ok bool, err error) {
+	if ok {
+		fmt.Fprintln(out, "dns upstream: answering, class IN resolved")
+		return
+	}
+	fmt.Fprintf(out, "dns upstream: not answering (%v), class IN answered with REFUSED\n", err)
 }
 
 // every calls f each interval until stop is closed.
@@ -189,6 +202,7 @@ func runWithAddrs(ctx context.Context, cfg Config, up dnspot.Upstream, addrs cha
 		up = nil
 	case up == nil:
 		dot = dnspot.NewDoT(time.Now)
+		dot.Report = func(ok bool, err error) { reportUpstream(stdout, ok, err) }
 		up = dot
 	}
 
