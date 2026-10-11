@@ -64,9 +64,13 @@ Every request is counted against these budgets:
   all answers together has room for its answer.
 - The sixth packet of a source makes it a target; from then on it gets no
   more answers from that service.
+- Requests without an answer count as well, for example an NTP mode the
+  persona does not answer, or an SSDP request without the headers the
+  daemon needs.
 - The 21st packet of a network blocks the network: none of its addresses
-  gets an answer from any service any more. Sources in such a network are
-  not written as scanners.
+  gets an answer over UDP from any service any more. Sources in such a
+  network are not written as scanners, except sources of DNS over TCP
+  (see below).
 - The state of a source or a network lasts until it has sent no packet for
   10 minutes; every packet starts the 10 minutes again. Then it is removed,
   and a target gets its end line.
@@ -86,8 +90,12 @@ from those over UDP:
 - A source gets answers to its first 5 queries over TCP; further queries
   get no answer until the source has been quiet for 10 minutes.
 - A source over TCP is never a target, and its queries are not counted for
-  its network. It also gets its answers when its network is blocked.
+  its network. It also gets its answers when its network is blocked, and
+  it is written as a scanner there too.
 - The budget for all answers together applies to UDP only.
+- Questions over TCP that go to Quad9 have an upstream share of their own,
+  2 queries per second with a burst of 5, within the rate limit of all
+  queries to Quad9. A question beyond that share gets SERVFAIL.
 - At most 256 TCP connections are open at a time, 4 of them from one
   address. Further connections are closed right after they are accepted.
 
@@ -107,9 +115,10 @@ DNS answers on UDP and TCP port 53.
   (`9.9.9.9` and `149.112.112.112`) over DNS over TLS. This needs outgoing
   connections to port 853/tcp. The certificate of `dns.quad9.net` is checked
   against the CA bundle of the image, with TLS 1.2 or later. Answers are
-  cached, and the queries to Quad9 have a rate limit of their own; questions
-  over TCP have a smaller share within it. A question Quad9 does not answer
-  in time, or that is over the rate limit, gets SERVFAIL.
+  cached, and the queries to Quad9 have a rate limit of their own, 10 per
+  second with a burst of 20; questions over TCP have a smaller share within
+  it. A question Quad9 does not answer in time, or that is over the rate
+  limit, gets SERVFAIL, over UDP and over TCP.
 - **Health of the upstream.** ddospot asks Quad9 once a minute while it
   answers, and every 10 seconds while it does not. Until the first of these
   probes succeeds, and after three failed probes in a row, questions of
