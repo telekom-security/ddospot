@@ -31,7 +31,8 @@ var Ports = map[limit.Proto]int{
 }
 
 // Logger is a limit.Observer that writes every event as one JSON line. It
-// is safe for concurrent use.
+// is safe for concurrent use. An event the log budget would leave out is
+// counted as dropped without being built.
 type Logger struct {
 	w       *jsonlog.Writer
 	persona string
@@ -61,6 +62,9 @@ func seconds(first, last time.Time) int {
 // Scanner writes a source that stayed within its budget into the log file
 // of its pot.
 func (l *Logger) Scanner(s limit.Source) {
+	if !l.w.Allow(Files[s.Proto]) {
+		return
+	}
 	ev := sampleEvent(s.Sample)
 	ev["time"] = jsonlog.Time(s.First)
 	ev["src_ip"] = s.Addr.String()
@@ -91,11 +95,17 @@ func (l *Logger) target(event string, s limit.Source) map[string]any {
 
 // TargetStart writes the start of a source that went beyond its budget.
 func (l *Logger) TargetStart(s limit.Source) {
+	if !l.w.Allow(targets) {
+		return
+	}
 	l.w.Write(targets, l.target("attack_start", s))
 }
 
 // TargetEnd writes the end of a source announced by TargetStart.
 func (l *Logger) TargetEnd(s limit.Source) {
+	if !l.w.Allow(targets) {
+		return
+	}
 	ev := l.target("attack_end", s)
 	ev["last_seen"] = jsonlog.Time(s.Last)
 	ev["attack_seconds"] = seconds(s.First, s.Last)
@@ -119,11 +129,17 @@ func (l *Logger) net(event string, n limit.Net) map[string]any {
 
 // NetStart writes the start of a network that went beyond its budget.
 func (l *Logger) NetStart(n limit.Net) {
+	if !l.w.Allow(targets) {
+		return
+	}
 	l.w.Write(targets, l.net("net_start", n))
 }
 
 // NetEnd writes the end of a network announced by NetStart.
 func (l *Logger) NetEnd(n limit.Net) {
+	if !l.w.Allow(targets) {
+		return
+	}
 	ev := l.net("net_end", n)
 	ev["last_seen"] = jsonlog.Time(n.Last)
 	ev["attack_seconds"] = seconds(n.First, n.Last)

@@ -61,7 +61,7 @@ func Open(dir string, now func() time.Time) (*Writer, error) {
 // Write appends ev as one line to file, which must be one of the five log
 // file names (anything else is a programming error and panics). Keys are
 // sorted. A nil event writes nothing. A line beyond the budget is counted by
-// Dropped, a line lost to an error by Errors.
+// Dropped and not encoded, a line lost to an error by Errors.
 func (w *Writer) Write(file string, ev map[string]any) {
 	if !allowed[file] {
 		panic("jsonlog: unknown log file " + file)
@@ -69,21 +69,21 @@ func (w *Writer) Write(file string, ev map[string]any) {
 	if ev == nil {
 		return
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed {
 		return
 	}
-	if enc.Encode(ev) != nil {
-		w.errors++
-		return
-	}
 	now := w.now()
 	if !w.bucket.Can(1, now) {
 		w.dropped++
+		return
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if enc.Encode(ev) != nil {
+		w.errors++
 		return
 	}
 	f := w.files[file]
@@ -100,6 +100,27 @@ func (w *Writer) Write(file string, ev map[string]any) {
 	if n, err := f.Write(buf.Bytes()); err != nil || n != buf.Len() {
 		w.errors++
 	}
+}
+
+// Allow reports whether a line for file would be written now, without
+// taking from the budget, so that a caller can skip building an event that
+// would be left out. A false answer with the budget spent counts that line
+// in Dropped; after Close the answer is false and nothing is counted. file
+// must be one of the five log file names, as for Write.
+func (w *Writer) Allow(file string) bool {
+	if !allowed[file] {
+		panic("jsonlog: unknown log file " + file)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return false
+	}
+	if !w.bucket.Can(1, w.now()) {
+		w.dropped++
+		return false
+	}
+	return true
 }
 
 // Dropped returns the number of lines left out by the budget since the last

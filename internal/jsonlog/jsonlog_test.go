@@ -177,3 +177,83 @@ func TestNilEventWritesNothing(t *testing.T) {
 		t.Fatalf("%q", b)
 	}
 }
+
+func TestBudgetCheckedBeforeEncoding(t *testing.T) {
+	now := time.Unix(0, 0)
+	w := mustOpen(t, t.TempDir(), func() time.Time { return now })
+	defer w.Close()
+	for i := 0; i < 400; i++ {
+		w.Write("targets.log", map[string]any{"i": i})
+	}
+	w.Write("targets.log", map[string]any{"c": make(chan int)})
+	if d, e := w.Dropped(), w.Errors(); d != 1 || e != 0 {
+		t.Fatalf("dropped %d errors %d, want 1 and 0", d, e)
+	}
+}
+
+func TestClosedSkipsEncoding(t *testing.T) {
+	w := mustOpen(t, t.TempDir(), time.Now)
+	w.Close()
+	w.Write("targets.log", map[string]any{"c": make(chan int)})
+	if d, e := w.Dropped(), w.Errors(); d != 0 || e != 0 {
+		t.Fatalf("dropped %d errors %d, want 0 and 0", d, e)
+	}
+}
+
+func TestManyWritesAtOneInstant(t *testing.T) {
+	d := t.TempDir()
+	now := time.Unix(0, 0)
+	w := mustOpen(t, d, func() time.Time { return now })
+	ev := map[string]any{"src_ip": "192.0.2.1", "req_pkt": strings.Repeat("A", 684), "packets": 12, "dns_name": "example.org."}
+	start := time.Now()
+	for i := 0; i < 200000; i++ {
+		w.Write("targets.log", ev)
+	}
+	if el := time.Since(start); el >= time.Second {
+		t.Fatalf("200000 writes took %v", el)
+	}
+	if got := w.Dropped(); got != 200000-400 {
+		t.Fatalf("dropped %d", got)
+	}
+	w.Close()
+	b, _ := os.ReadFile(filepath.Join(d, "targets.log"))
+	if n := strings.Count(string(b), "\n"); n != 400 {
+		t.Fatalf("lines %d, want 400", n)
+	}
+}
+
+func TestAllow(t *testing.T) {
+	d := t.TempDir()
+	now := time.Unix(0, 0)
+	w := mustOpen(t, d, func() time.Time { return now })
+	for i := 0; i < 1000; i++ {
+		if !w.Allow("targets.log") {
+			t.Fatal("not allowed with a full budget")
+		}
+	}
+	for i := 0; i < 400; i++ {
+		w.Write("targets.log", map[string]any{"i": i})
+	}
+	if got := w.Dropped(); got != 0 {
+		t.Fatalf("Allow took budget: dropped %d", got)
+	}
+	if w.Allow("targets.log") || w.Allow("ntpot.log") {
+		t.Fatal("allowed with the budget spent")
+	}
+	if got := w.Dropped(); got != 2 {
+		t.Fatalf("dropped %d, want 2", got)
+	}
+	w.Close()
+	if w.Allow("targets.log") {
+		t.Fatal("allowed after Close")
+	}
+	if got := w.Dropped(); got != 0 {
+		t.Fatalf("dropped %d after Close, want 0", got)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("no panic")
+		}
+	}()
+	w.Allow("other.log")
+}

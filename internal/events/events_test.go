@@ -142,3 +142,62 @@ func TestFilesAndPorts(t *testing.T) {
 }
 
 var _ limit.Observer = (*Logger)(nil)
+
+func TestDroppedEventsAreNotBuilt(t *testing.T) {
+	d := t.TempDir()
+	frozen := time.Unix(0, 0)
+	w, _ := jsonlog.Open(d, func() time.Time { return frozen })
+	defer w.Close()
+	l := New(w, "debian11")
+	src := limit.Source{Proto: limit.DNS, Addr: netip.MustParseAddr("192.0.2.1"), Port: 4000, First: frozen, Last: frozen, Packets: 1,
+		Sample: limit.Sample{Transport: "udp", Req: make([]byte, 512), ReqSize: 700, Fields: map[string]any{"dns_name": "example.org."}}}
+	n := limit.Net{Prefix: netip.MustParsePrefix("192.0.2.0/24"), First: frozen, Last: frozen, Packets: 1, Sources: 1}
+	for i := 0; i < 400; i++ {
+		l.NetStart(n)
+	}
+	w.Dropped()
+	calls := []func(){func() { l.Scanner(src) }, func() { l.TargetStart(src) }, func() { l.TargetEnd(src) },
+		func() { l.NetStart(n) }, func() { l.NetEnd(n) }}
+	for i, f := range calls {
+		if a := testing.AllocsPerRun(100, f); a != 0 {
+			t.Errorf("call %d: %v allocations with the budget spent", i, a)
+		}
+	}
+	w.Dropped()
+	start := time.Now()
+	for i := 0; i < 200000; i++ {
+		l.Scanner(src)
+	}
+	if el := time.Since(start); el >= time.Second {
+		t.Fatalf("200000 events took %v", el)
+	}
+	if got := w.Dropped(); got != 200000 {
+		t.Fatalf("dropped %d, want 200000", got)
+	}
+}
+
+func TestFlushOfFullTables(t *testing.T) {
+	d := t.TempDir()
+	frozen := time.Now()
+	w, _ := jsonlog.Open(d, func() time.Time { return frozen })
+	lim := limit.New(limit.Defaults(time.Hour), time.Now, New(w, "debian11"))
+	s := limit.Sample{Transport: "udp", Req: make([]byte, 100), Fields: map[string]any{"mode": "client"}}
+	for i := 0; i < 200000; i++ {
+		a := netip.AddrFrom16([16]byte{0x20, 0x01, byte(i >> 16), byte(i >> 8), byte(i), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
+		lim.Admit(limit.NTP, netip.AddrPortFrom(a, 123), s, 0, 0)
+	}
+	start := time.Now()
+	lim.Flush()
+	w.Close()
+	if el := time.Since(start); el >= time.Second {
+		t.Fatalf("flush of 200000 sources took %v", el)
+	} else {
+		t.Logf("flush of 200000 sources: %v", el)
+	}
+	if ev := readJSON(t, filepath.Join(d, "ntpot.log")); len(ev) != 400 {
+		t.Fatalf("lines %d, want 400", len(ev))
+	}
+	if got := w.Dropped(); got != 200000-400 {
+		t.Fatalf("dropped %d", got)
+	}
+}
