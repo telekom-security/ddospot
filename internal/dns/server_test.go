@@ -619,3 +619,29 @@ func TestCNAMEToNoData(t *testing.T) {
 		t.Fatalf("upstream calls %d after 900 s", up.calls.Load())
 	}
 }
+
+type targetCount struct {
+	testutil.NopObs
+	n atomic.Int32
+}
+
+func (o *targetCount) TargetStart(limit.Source) { o.n.Add(1) }
+
+func TestTCPSourceAnsweredFiveTimesNoTarget(t *testing.T) {
+	obs := &targetCount{}
+	h := NewHandler(per("centos7"), limit.New(limit.Defaults(time.Minute), time.Now, obs), nil)
+	src := &net.TCPAddr{IP: net.IPv4(203, 0, 113, 77), Port: 40000}
+	got := 0
+	for i := 0; i < 8; i++ {
+		if serve(t, h, &testutil.DNSRecorder{Remote: src}, query("version.bind.", dns.TypeTXT, dns.ClassCHAOS)) != nil {
+			got++
+		}
+	}
+	if got != 5 || obs.n.Load() != 0 {
+		t.Fatalf("answers %d, target_start %d", got, obs.n.Load())
+	}
+	udp := &net.UDPAddr{IP: src.IP, Port: 40000}
+	if serve(t, h, &testutil.DNSRecorder{Remote: udp}, query("version.bind.", dns.TypeTXT, dns.ClassCHAOS)) == nil {
+		t.Fatal("TCP queries counted for the UDP budget")
+	}
+}

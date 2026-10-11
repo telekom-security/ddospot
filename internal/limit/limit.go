@@ -84,21 +84,20 @@ const (
 
 type netEntry struct {
 	Net
-	blocked  bool
-	answered int
+	blocked bool
 }
 
 type srcEntry struct {
 	Source
 	class     class
-	answered  int
-	announced bool // TargetStart was emitted, so TargetEnd is owed
-	net       *netEntry
+	announced bool      // TargetStart was emitted, so TargetEnd is owed
+	net       *netEntry // nil for TCP sources
 }
 
 type srcKey struct {
 	proto Proto
 	addr  netip.Addr
+	tcp   bool
 }
 
 // Limiter is safe for concurrent use.
@@ -143,26 +142,38 @@ func cloneSample(s Sample) Sample {
 	return s
 }
 
-// Admit counts the packet and reports whether an answer of the given size may be sent.
+// Admit counts the packet and reports whether an answer of the given size
+// may be sent. The source and network budgets count packets: within a
+// window the first PerSource packets of a source and the first PerNet
+// packets of a network may be answered, as far as the global budget
+// allows. The packet after them makes the source a target and blocks the
+// network.
+//
+// A source whose Sample.Transport is "tcp" has a state of its own: it gets
+// at most PerSource answers per window, but it is never a target and its
+// packets are not counted for its network.
 func (l *Limiter) Admit(p Proto, src netip.AddrPort, s Sample, datagrams, bytes int) bool {
 	addr := src.Addr().Unmap()
 	datagrams, bytes = max(datagrams, 0), max(bytes, 0)
+	tcp := s.Transport == "tcp"
 	var calls []func()
 	ok := func() bool {
 		l.mu.Lock()
 		defer l.mu.Unlock()
 		now := l.now()
 
-		prefix := netOf(addr)
-		n := l.nets[prefix]
-		if n == nil {
-			if len(l.nets) >= l.cfg.MaxNets {
-				return false
+		var n *netEntry
+		if !tcp {
+			prefix := netOf(addr)
+			if n = l.nets[prefix]; n == nil {
+				if len(l.nets) >= l.cfg.MaxNets {
+					return false
+				}
+				n = &netEntry{Net: Net{Prefix: prefix, First: now}}
+				l.nets[prefix] = n
 			}
-			n = &netEntry{Net: Net{Prefix: prefix, First: now}}
-			l.nets[prefix] = n
 		}
-		key := srcKey{p, addr}
+		key := srcKey{p, addr, tcp}
 		e := l.srcs[key]
 		if e == nil {
 			if len(l.srcs) >= l.cfg.MaxSources {
@@ -174,39 +185,39 @@ func (l *Limiter) Admit(p Proto, src netip.AddrPort, s Sample, datagrams, bytes 
 				net:    n,
 			}
 			l.srcs[key] = e
-			n.Sources++
+			if n != nil {
+				n.Sources++
+			}
 		}
 		e.Last = now
 		e.Packets++
+		overSource := e.Packets > uint64(l.cfg.PerSource)
+		if tcp {
+			return !overSource
+		}
 		n.Last = now
 		n.Packets++
 
 		if n.blocked {
 			return false
 		}
-		if e.answered >= l.cfg.PerSource {
-			if e.class != target {
-				e.class = target
-				e.announced = true
-				snap := e.Source
-				calls = append(calls, func() { l.obs.TargetStart(snap) })
-			}
-			return false
+		if overSource && e.class != target {
+			e.class = target
+			e.announced = true
+			snap := e.Source
+			calls = append(calls, func() { l.obs.TargetStart(snap) })
 		}
-		if n.answered >= l.cfg.PerNet {
+		if n.Packets > uint64(l.cfg.PerNet) {
 			n.blocked = true
 			snap := n.Net
 			calls = append(calls, func() { l.obs.NetStart(snap) })
 			return false
 		}
-		if l.pkts.Can(float64(datagrams), now) && l.byts.Can(float64(bytes), now) {
-			l.pkts.Take(float64(datagrams), now)
-			l.byts.Take(float64(bytes), now)
-		} else {
+		if overSource || !l.pkts.Can(float64(datagrams), now) || !l.byts.Can(float64(bytes), now) {
 			return false
 		}
-		e.answered++
-		n.answered++
+		l.pkts.Take(float64(datagrams), now)
+		l.byts.Take(float64(bytes), now)
 		return true
 	}()
 	for _, c := range calls {
@@ -223,7 +234,7 @@ func (l *Limiter) Tick() {
 	for k, e := range l.srcs {
 		if e.class == pending && now.Sub(e.First) >= l.cfg.Classify {
 			e.class = scanner
-			if !e.net.blocked {
+			if e.net == nil || !e.net.blocked {
 				snap := e.Source
 				calls = append(calls, func() { l.obs.Scanner(snap) })
 			}
@@ -260,7 +271,7 @@ func (l *Limiter) Flush() {
 		switch {
 		case e.announced:
 			calls = append(calls, func() { l.obs.TargetEnd(snap) })
-		case e.class == pending && !e.net.blocked:
+		case e.class == pending && (e.net == nil || !e.net.blocked):
 			calls = append(calls, func() { l.obs.Scanner(snap) })
 		}
 	}

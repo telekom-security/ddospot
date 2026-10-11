@@ -349,3 +349,149 @@ func TestNegativeSizesAddNoTokens(t *testing.T) {
 		t.Fatal("negative sizes added tokens")
 	}
 }
+
+// spendGlobal uses the packet budget of the instant with sources outside
+// 203.0.113.0/24.
+func spendGlobal(t *testing.T, l *Limiter) {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		l.Admit(Chargen, netip.AddrPortFrom(netip.AddrFrom4([4]byte{10, byte(i), 0, 1}), 1), Sample{}, 1, 64)
+	}
+	if l.Admit(Chargen, ap("10.250.0.1:1"), Sample{}, 1, 64) {
+		t.Fatal("global budget not spent")
+	}
+}
+
+func TestSourceBudgetCountsRefusedPackets(t *testing.T) {
+	l, c, r := newTest(1000)
+	spendGlobal(t, l)
+	for i := 0; i < 50; i++ {
+		if l.Admit(NTP, ap("203.0.113.9:1"), Sample{}, 1, 48) {
+			t.Fatalf("packet %d answered with the global budget spent", i+1)
+		}
+		if want := min(max(i-4, 0), 1); len(r.tstart) != want {
+			t.Fatalf("after packet %d: target_start events = %d, want %d", i+1, len(r.tstart), want)
+		}
+	}
+	c.t = c.t.Add(61 * time.Second)
+	l.Tick()
+	l.Flush()
+	for _, s := range r.scanner {
+		if s.Addr.String() == "203.0.113.9" {
+			t.Fatalf("target reported as scanner: %+v", s)
+		}
+	}
+	if len(r.tend) != 1 {
+		t.Fatalf("target_end events = %d, want 1", len(r.tend))
+	}
+}
+
+func TestNetBudgetCountsRefusedPackets(t *testing.T) {
+	l, _, r := newTest(1000)
+	spendGlobal(t, l)
+	for i := 1; i <= 21; i++ {
+		l.Admit(Chargen, netip.AddrPortFrom(netip.AddrFrom4([4]byte{203, 0, 113, byte(i)}), 1), Sample{}, 1, 64)
+		if want := min(max(i-20, 0), 1); len(r.nstart) != want {
+			t.Fatalf("after packet %d: net_start events = %d, want %d", i, len(r.nstart), want)
+		}
+	}
+	if r.nstart[0].Packets != 21 || r.nstart[0].Prefix.String() != "203.0.113.0/24" {
+		t.Fatalf("net_start = %+v", r.nstart[0])
+	}
+}
+
+func TestPacketAfterNetBudgetBlocksNet(t *testing.T) {
+	l, _, r := newTest(1000)
+	for i := 1; i <= 4; i++ {
+		for j := 0; j < 5; j++ {
+			if !l.Admit(SSDP, netip.AddrPortFrom(netip.AddrFrom4([4]byte{203, 0, 113, byte(i)}), 1), Sample{}, 1, 100) {
+				t.Fatalf("source %d: packet %d refused", i, j+1)
+			}
+		}
+	}
+	if l.Admit(SSDP, ap("203.0.113.1:1"), Sample{}, 1, 100) {
+		t.Fatal("6th packet of a source answered")
+	}
+	if len(r.tstart) != 1 || len(r.nstart) != 1 || r.nstart[0].Packets != 21 {
+		t.Fatalf("target_start=%d net_start=%+v", len(r.tstart), r.nstart)
+	}
+	if l.Admit(SSDP, ap("203.0.113.50:1"), Sample{}, 1, 100) {
+		t.Fatal("answer inside a blocked net")
+	}
+}
+
+func tcpSample() Sample { return Sample{Transport: "tcp"} }
+
+func TestTCPSourceIsNoTarget(t *testing.T) {
+	l, c, r := newTest(1000)
+	ok := 0
+	for i := 0; i < 30; i++ {
+		if l.Admit(DNS, ap("198.51.100.30:5000"), tcpSample(), 0, 0) {
+			ok++
+		}
+	}
+	if ok != 5 {
+		t.Fatalf("answers over TCP = %d, want 5", ok)
+	}
+	if len(r.tstart) != 0 || len(r.nstart) != 0 {
+		t.Fatalf("target_start=%d net_start=%d", len(r.tstart), len(r.nstart))
+	}
+	c.t = c.t.Add(61 * time.Second)
+	l.Tick()
+	if len(r.scanner) != 1 || r.scanner[0].Packets != 30 || r.scanner[0].Sample.Transport != "tcp" {
+		t.Fatalf("scanner = %+v", r.scanner)
+	}
+}
+
+func TestTCPOutsideNetBudget(t *testing.T) {
+	l, c, r := newTest(1000)
+	for i := 1; i <= 10; i++ {
+		for j := 0; j < 5; j++ {
+			if !l.Admit(DNS, netip.AddrPortFrom(netip.AddrFrom4([4]byte{203, 0, 113, byte(i)}), 1), tcpSample(), 0, 0) {
+				t.Fatalf("tcp source %d: query %d refused", i, j+1)
+			}
+		}
+	}
+	if len(r.nstart) != 0 {
+		t.Fatal("TCP queries counted for the network")
+	}
+	for i := 100; i < 130; i++ {
+		l.Admit(NTP, netip.AddrPortFrom(netip.AddrFrom4([4]byte{203, 0, 113, byte(i)}), 1), Sample{}, 1, 48)
+	}
+	if len(r.nstart) != 1 {
+		t.Fatalf("net_start events = %d, want 1", len(r.nstart))
+	}
+	ok := 0
+	for j := 0; j < 8; j++ {
+		if l.Admit(DNS, ap("203.0.113.200:1"), tcpSample(), 0, 0) {
+			ok++
+		}
+	}
+	if ok != 5 {
+		t.Fatalf("answers over TCP inside a blocked net = %d, want 5", ok)
+	}
+	c.t = c.t.Add(61 * time.Second)
+	l.Tick()
+	if len(r.scanner) != 11 {
+		t.Fatalf("scanner events = %d, want 11 (the TCP sources)", len(r.scanner))
+	}
+}
+
+func TestTCPAndUDPCountedApart(t *testing.T) {
+	l, _, r := newTest(1000)
+	for i := 0; i < 5; i++ {
+		l.Admit(DNS, ap("198.51.100.40:1"), tcpSample(), 0, 0)
+	}
+	if !l.Admit(DNS, ap("198.51.100.40:1"), Sample{Transport: "udp"}, 1, 60) {
+		t.Fatal("TCP queries counted for the UDP budget")
+	}
+	for i := 0; i < 5; i++ {
+		l.Admit(DNS, ap("198.51.100.41:1"), Sample{Transport: "udp"}, 1, 60)
+	}
+	if len(r.tstart) != 0 {
+		t.Fatal("target before the 6th UDP packet")
+	}
+	if !l.Admit(DNS, ap("198.51.100.41:1"), tcpSample(), 0, 0) {
+		t.Fatal("UDP packets counted for the TCP budget")
+	}
+}
