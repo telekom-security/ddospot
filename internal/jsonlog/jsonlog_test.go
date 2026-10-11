@@ -20,7 +20,7 @@ func TestTimeFormat(t *testing.T) {
 func TestWriteAppendsJSONLines(t *testing.T) {
 	d := t.TempDir()
 	now := time.Unix(0, 0)
-	w, _ := Open(d, func() time.Time { return now })
+	w := mustOpen(t, d, func() time.Time { return now })
 	w.Write("ntpot.log", map[string]any{"src_ip": "192.0.2.1", "mode": "DATA"})
 	w.Write("ntpot.log", map[string]any{"src_ip": "192.0.2.2"})
 	w.Close()
@@ -40,7 +40,7 @@ func TestWriteAppendsJSONLines(t *testing.T) {
 func TestWriteBudget(t *testing.T) {
 	d := t.TempDir()
 	now := time.Unix(0, 0)
-	w, _ := Open(d, func() time.Time { return now })
+	w := mustOpen(t, d, func() time.Time { return now })
 	for i := 0; i < 1000; i++ {
 		w.Write("targets.log", map[string]any{"i": i})
 	}
@@ -58,13 +58,13 @@ func TestUnknownFilePanics(t *testing.T) {
 			t.Fatal("no panic")
 		}
 	}()
-	w, _ := Open(t.TempDir(), time.Now)
+	w := mustOpen(t, t.TempDir(), time.Now)
 	w.Write("../x.log", nil)
 }
 
 func TestSortedKeysNoHTMLEscaping(t *testing.T) {
 	d := t.TempDir()
-	w, _ := Open(d, time.Now)
+	w := mustOpen(t, d, time.Now)
 	w.Write("dnspot.log", map[string]any{"z": "a<b>&c", "a": 1})
 	w.Close()
 	b, _ := os.ReadFile(filepath.Join(d, "dnspot.log"))
@@ -78,7 +78,7 @@ func TestOpenAppendsToExistingFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(d, "ssdpot.log"), []byte("old\n"), 0o640); err != nil {
 		t.Fatal(err)
 	}
-	w, _ := Open(d, time.Now)
+	w := mustOpen(t, d, time.Now)
 	w.Write("ssdpot.log", map[string]any{"st": "x"})
 	w.Close()
 	b, _ := os.ReadFile(filepath.Join(d, "ssdpot.log"))
@@ -89,7 +89,7 @@ func TestOpenAppendsToExistingFile(t *testing.T) {
 
 func TestConcurrentWrites(t *testing.T) {
 	d := t.TempDir()
-	w, _ := Open(d, time.Now)
+	w := mustOpen(t, d, time.Now)
 	var wg sync.WaitGroup
 	for g := 0; g < 8; g++ {
 		wg.Add(1)
@@ -109,5 +109,71 @@ func TestConcurrentWrites(t *testing.T) {
 		if json.Unmarshal([]byte(l), &m) != nil {
 			t.Fatalf("not JSON: %q", l)
 		}
+	}
+}
+
+func mustOpen(t *testing.T, dir string, now func() time.Time) *Writer {
+	t.Helper()
+	w, err := Open(dir, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+func TestOpenFailureCountsError(t *testing.T) {
+	d := t.TempDir()
+	if err := os.Mkdir(filepath.Join(d, "ntpot.log"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	w := mustOpen(t, d, time.Now)
+	w.Write("ntpot.log", map[string]any{"a": 1})
+	if got := w.Errors(); got != 1 {
+		t.Fatalf("errors %d, want 1", got)
+	}
+	if got := w.Errors(); got != 0 {
+		t.Fatalf("counter not reset: %d", got)
+	}
+	w.Close()
+}
+
+func TestFailedOpenKeepsBudget(t *testing.T) {
+	d := t.TempDir()
+	if err := os.Mkdir(filepath.Join(d, "ntpot.log"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(0, 0)
+	w := mustOpen(t, d, func() time.Time { return now })
+	for i := 0; i < 1000; i++ {
+		w.Write("ntpot.log", map[string]any{"i": i})
+	}
+	for i := 0; i < 400; i++ {
+		w.Write("targets.log", map[string]any{"i": i})
+	}
+	if got := w.Dropped(); got != 0 {
+		t.Fatalf("dropped %d, want 0", got)
+	}
+	if got := w.Errors(); got != 1000 {
+		t.Fatalf("errors %d, want 1000", got)
+	}
+	w.Close()
+}
+
+func TestEncodeFailureCountsError(t *testing.T) {
+	w := mustOpen(t, t.TempDir(), time.Now)
+	w.Write("dnspot.log", map[string]any{"c": make(chan int)})
+	if got := w.Errors(); got != 1 {
+		t.Fatalf("errors %d, want 1", got)
+	}
+	w.Close()
+}
+
+func TestNilEventWritesNothing(t *testing.T) {
+	d := t.TempDir()
+	w := mustOpen(t, d, time.Now)
+	w.Write("ssdpot.log", nil)
+	w.Close()
+	if b, _ := os.ReadFile(filepath.Join(d, "ssdpot.log")); len(b) != 0 {
+		t.Fatalf("%q", b)
 	}
 }
