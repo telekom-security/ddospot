@@ -32,6 +32,7 @@ func ReadTimeout(c *net.UDPConn, d time.Duration) int {
 	buf := make([]byte, 65535)
 	c.SetReadDeadline(time.Now().Add(d))
 	n, err := c.Read(buf)
+	c.SetReadDeadline(time.Time{})
 	if err != nil {
 		return 0
 	}

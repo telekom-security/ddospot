@@ -2,11 +2,12 @@
 package chargen
 
 import (
-	"errors"
 	"net"
+	"net/netip"
 	"sync/atomic"
 
 	"github.com/t3chn0m4g3/ddospot/internal/limit"
+	"github.com/t3chn0m4g3/ddospot/internal/udp"
 )
 
 const (
@@ -49,20 +50,14 @@ func New(conn *net.UDPConn, lim *limit.Limiter) *Server {
 
 // Serve answers datagrams until the connection is closed.
 func (s *Server) Serve() error {
-	buf := make([]byte, 65535)
-	for {
-		n, src, err := s.conn.ReadFromUDPAddrPort(buf)
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) {
-				return nil
-			}
-			continue
-		}
-		sample := limit.Sample{Transport: "udp", Req: buf[:n], RespSize: Size, Fields: map[string]any{}}
-		if !s.lim.Admit(limit.Chargen, src, sample, 1, Size) {
-			continue
-		}
-		o := s.off.Add(1) - 1
-		s.conn.WriteToUDPAddrPort(Response(int(o)), src)
+	return udp.Loop(s.conn, s.handle)
+}
+
+func (s *Server) handle(req []byte, src netip.AddrPort) {
+	sample := limit.Sample{Transport: "udp", Req: req, RespSize: Size, Fields: map[string]any{}}
+	if !s.lim.Admit(limit.Chargen, src, sample, 1, Size) {
+		return
 	}
+	o := s.off.Add(1) - 1
+	s.conn.WriteToUDPAddrPort(Response(int(o)), src)
 }

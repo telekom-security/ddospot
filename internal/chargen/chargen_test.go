@@ -52,3 +52,20 @@ func FuzzResponse(f *testing.F) {
 		}
 	})
 }
+
+func TestServeReturnsAfterClose(t *testing.T) {
+	srv, _ := testutil.UDPPair(t)
+	lim := limit.New(limit.Defaults(time.Minute), time.Now, testutil.NopObs{})
+	done := make(chan error, 1)
+	go func() { done <- New(srv, lim).Serve() }()
+	time.Sleep(50 * time.Millisecond)
+	srv.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Serve did not return")
+	}
+}
