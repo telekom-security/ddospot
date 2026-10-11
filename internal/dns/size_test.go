@@ -49,10 +49,12 @@ func TestLimitSizes(t *testing.T) {
 			resp := Limit(bigReply(req, n), req, c.udp)
 			fits := bigReply(req, n)
 			fits.Compress = true
-			if resp.Len() > c.limit {
-				t.Fatalf("%s/%d: %d bytes", c.name, n, resp.Len())
+			b, err := resp.Pack()
+			if err != nil || len(b) > c.limit {
+				t.Fatalf("%s/%d: %d bytes, %v", c.name, n, len(b), err)
 			}
-			if fits.Len() <= c.limit {
+			fb, _ := fits.Pack()
+			if len(fb) <= c.limit {
 				if resp.Truncated || len(resp.Answer) != n {
 					t.Fatalf("%s/%d: cut although it fits", c.name, n)
 				}
@@ -67,6 +69,31 @@ func TestLimitSizes(t *testing.T) {
 			if len(resp.Question) != 1 {
 				t.Fatalf("%s/%d: question dropped", c.name, n)
 			}
+		}
+	}
+}
+
+// An answer just above or just below a limit is cut by its packed size.
+func TestLimitAtTheEdge(t *testing.T) {
+	req := new(dns.Msg)
+	req.SetQuestion("edge.example.", dns.TypeTXT)
+	for n := 400; n <= 520; n++ {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		txt := strings.Repeat("a", n)
+		resp.Answer = []dns.RR{&dns.TXT{Hdr: dns.RR_Header{Name: "edge.example.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 300}, Txt: []string{txt[:n/3], txt[n/3 : 2*n/3], txt[2*n/3:]}}}
+		full := resp.Copy()
+		full.Compress = true
+		fb, err := full.Pack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := Limit(resp, req, true).Pack()
+		if err != nil || len(b) > 512 {
+			t.Fatalf("%d: %d bytes, %v", n, len(b), err)
+		}
+		if cut := resp.Truncated; cut != (len(fb) > 512) {
+			t.Fatalf("%d: packed %d, truncated %v", n, len(fb), cut)
 		}
 	}
 }

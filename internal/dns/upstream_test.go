@@ -41,6 +41,20 @@ func pipeDial(dials *atomic.Int32, answer func(q *dns.Msg) *dns.Msg) func(contex
 	}
 }
 
+// closeIdle closes the idle connections of d when the test ends, which
+// also ends the goroutines serving them.
+func closeIdle(t *testing.T, d *DoT) {
+	t.Cleanup(func() {
+		for {
+			co := d.take()
+			if co == nil {
+				return
+			}
+			co.Close()
+		}
+	})
+}
+
 func okAnswer(q *dns.Msg) *dns.Msg {
 	m := new(dns.Msg)
 	m.SetReply(q)
@@ -190,6 +204,7 @@ func TestUpstreamBudget(t *testing.T) {
 	d := NewDoT(frozen)
 	var dials atomic.Int32
 	d.dial = pipeDial(&dials, okAnswer)
+	closeIdle(t, d)
 	ok, spent := 0, 0
 	for i := 0; i < 25; i++ {
 		_, err := ask(d, "x.example.")
@@ -221,6 +236,7 @@ func TestConnReuse(t *testing.T) {
 	d := NewDoT(time.Now)
 	var dials atomic.Int32
 	d.dial = pipeDial(&dials, okAnswer)
+	closeIdle(t, d)
 	for i := 0; i < 5; i++ {
 		r, err := ask(d, "x.example.")
 		if err != nil || len(r.Answer) != 1 {
@@ -234,6 +250,11 @@ func TestConnReuse(t *testing.T) {
 	for i := range conns {
 		conns[i], _ = d.dial(context.Background())
 	}
+	t.Cleanup(func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	})
 	for _, c := range conns {
 		d.put(c)
 	}
@@ -254,6 +275,7 @@ func TestStaleConnRedials(t *testing.T) {
 		}
 		return okAnswer(q)
 	})
+	closeIdle(t, d)
 	for i := 0; i < 2; i++ {
 		if _, err := ask(d, "x.example."); err != nil {
 			t.Fatalf("query %d: %v", i, err)
@@ -272,6 +294,7 @@ func TestAnswerMustMatch(t *testing.T) {
 		m.Question[0].Name = "other.example."
 		return m
 	})
+	closeIdle(t, d)
 	if _, err := ask(d, "x.example."); !errors.Is(err, errMismatch) {
 		t.Fatalf("%v", err)
 	}
@@ -293,6 +316,7 @@ func TestExchangeTimeout(t *testing.T) {
 	d.timeout = 50 * time.Millisecond
 	var dials atomic.Int32
 	d.dial = pipeDial(&dials, func(q *dns.Msg) *dns.Msg { time.Sleep(time.Second); return okAnswer(q) })
+	closeIdle(t, d)
 	t0 := time.Now()
 	if _, err := ask(d, "x.example."); err == nil {
 		t.Fatal("answer after the timeout")
@@ -314,6 +338,7 @@ func TestProbe(t *testing.T) {
 		m.Rcode = rcode
 		return m
 	})
+	closeIdle(t, d)
 	if err := d.probe(context.Background()); err != nil {
 		t.Fatal(err)
 	}

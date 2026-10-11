@@ -10,9 +10,11 @@ import (
 )
 
 const (
-	maxEntries = 10000
-	maxTTL     = 3600 // seconds, answers
-	maxNegTTL  = 900  // seconds, NXDOMAIN and NODATA
+	maxEntries    = 10000
+	maxEntryBytes = 4096     // larger entries are not cached
+	maxBytes      = 16 << 20 // all entries together
+	maxTTL        = 3600     // seconds, answers
+	maxNegTTL     = 900      // seconds, NXDOMAIN and NODATA
 )
 
 // cacheKey is a question with its name in lower case.
@@ -33,12 +35,47 @@ type entry struct {
 	ns     []dns.RR
 }
 
+// size is the length of the records of e in uncompressed wire format,
+// at least their packed length.
+func size(e entry) int {
+	n := 0
+	for _, rr := range e.answer {
+		n += dns.Len(rr)
+	}
+	for _, rr := range e.ns {
+		n += dns.Len(rr)
+	}
+	return n
+}
+
+// aliasesOnly reports whether the answer section holds only CNAME and
+// DNAME records for a question of another type: the name leads to a
+// NODATA answer.
+func aliasesOnly(m *dns.Msg, answer []dns.RR) bool {
+	if len(answer) == 0 || len(m.Question) != 1 {
+		return false
+	}
+	switch m.Question[0].Qtype {
+	case dns.TypeCNAME, dns.TypeDNAME:
+		return false
+	}
+	for _, rr := range answer {
+		switch rr.Header().Rrtype {
+		case dns.TypeCNAME, dns.TypeDNAME:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // entryOf takes the parts of an upstream reply that go into an answer,
 // as copies with their TTLs capped, and the time the entry may be
 // cached in seconds (0 = not cached). Answers are cached for their
-// lowest record TTL, at most 3600 s; NXDOMAIN and NODATA for the lower of
-// the SOA TTL and the SOA minimum, at most 900 s. Other RCODEs and
-// negative replies without a SOA record are not cached.
+// lowest record TTL, at most 3600 s; NXDOMAIN and NODATA, also behind
+// CNAME or DNAME records, for the lower of the SOA TTL and the SOA
+// minimum, at most 900 s. Other RCODEs and negative replies without a
+// SOA record are not cached.
 func entryOf(m *dns.Msg) (entry, uint32) {
 	e := entry{rcode: m.Rcode}
 	ttl := uint32(maxTTL)
@@ -52,7 +89,8 @@ func entryOf(m *dns.Msg) (entry, uint32) {
 		ttl = min(ttl, h.Ttl)
 		e.answer = append(e.answer, c)
 	}
-	negative := m.Rcode == dns.RcodeNameError || m.Rcode == dns.RcodeSuccess && len(e.answer) == 0
+	negative := m.Rcode == dns.RcodeNameError ||
+		m.Rcode == dns.RcodeSuccess && (len(e.answer) == 0 || aliasesOnly(m, e.answer))
 	if !negative {
 		if m.Rcode != dns.RcodeSuccess {
 			return e, 0
@@ -76,20 +114,31 @@ func entryOf(m *dns.Msg) (entry, uint32) {
 type slot struct {
 	key             cacheKey
 	e               entry
+	size            int
 	stored, expires time.Time
 }
 
-// cache holds up to max entries; when it is full, the entry stored
-// first is dropped.
+// cache holds up to max entries of together at most maxBytes; when it
+// is full, the entries stored first are dropped.
 type cache struct {
-	mu    sync.Mutex
-	max   int
-	m     map[cacheKey]*list.Element
-	order *list.List // of *slot, oldest first
+	mu       sync.Mutex
+	max      int
+	maxBytes int
+	bytes    int // size of all entries
+	m        map[cacheKey]*list.Element
+	order    *list.List // of *slot, oldest first
 }
 
-func newCache(max int) *cache {
-	return &cache{max: max, m: make(map[cacheKey]*list.Element), order: list.New()}
+func newCache(max, maxBytes int) *cache {
+	return &cache{max: max, maxBytes: maxBytes, m: make(map[cacheKey]*list.Element), order: list.New()}
+}
+
+// remove drops one entry; the caller holds c.mu.
+func (c *cache) remove(el *list.Element) {
+	s := el.Value.(*slot)
+	c.order.Remove(el)
+	delete(c.m, s.key)
+	c.bytes -= s.size
 }
 
 // aged returns copies of rrs with age seconds taken off their TTLs.
@@ -117,8 +166,7 @@ func (c *cache) get(k cacheKey, now time.Time) (entry, bool) {
 	}
 	s := el.Value.(*slot)
 	if !now.Before(s.expires) {
-		c.order.Remove(el)
-		delete(c.m, k)
+		c.remove(el)
 		return entry{}, false
 	}
 	var age uint32
@@ -128,27 +176,28 @@ func (c *cache) get(k cacheKey, now time.Time) (entry, bool) {
 	return entry{rcode: s.e.rcode, answer: aged(s.e.answer, age), ns: aged(s.e.ns, age)}, true
 }
 
-// put stores copies of the records of e under k for ttl seconds.
+// put stores copies of the records of e under k for ttl seconds. An
+// entry over maxEntryBytes is not stored.
 func (c *cache) put(k cacheKey, e entry, ttl uint32, now time.Time) {
-	if ttl == 0 {
+	n := size(e)
+	if ttl == 0 || n > maxEntryBytes || n > c.maxBytes {
 		return
 	}
 	s := &slot{
 		key:     k,
 		e:       entry{rcode: e.rcode, answer: aged(e.answer, 0), ns: aged(e.ns, 0)},
+		size:    n,
 		stored:  now,
 		expires: now.Add(time.Duration(ttl) * time.Second),
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if el := c.m[k]; el != nil {
-		c.order.Remove(el)
-		delete(c.m, k)
+		c.remove(el)
 	}
-	for len(c.m) >= c.max {
-		front := c.order.Front()
-		c.order.Remove(front)
-		delete(c.m, front.Value.(*slot).key)
+	for len(c.m) >= c.max || c.bytes+n > c.maxBytes {
+		c.remove(c.order.Front())
 	}
 	c.m[k] = c.order.PushBack(s)
+	c.bytes += n
 }

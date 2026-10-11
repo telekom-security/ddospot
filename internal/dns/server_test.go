@@ -114,6 +114,9 @@ func TestUDPSizeAndTCP(t *testing.T) {
 	if r.Len() > 1232 || !r.Truncated {
 		t.Fatalf("edns: len=%d tc=%v", r.Len(), r.Truncated)
 	}
+	if b, err := r.Pack(); err != nil || len(b) > 1232 {
+		t.Fatalf("edns: packed %d %v", len(b), err)
+	}
 	r, _, _ = (&dns.Client{Net: "tcp"}).Exchange(m, tcp)
 	if r.Truncated || len(r.Answer) != 20 {
 		t.Fatalf("tcp: %d", len(r.Answer))
@@ -179,18 +182,16 @@ func FuzzServe(f *testing.F) {
 			t.Fatalf("udp answer %d bytes", w.Msg.Len())
 		}
 		if w.Msg != nil {
-			if _, err := w.Msg.Pack(); err != nil {
-				t.Fatalf("pack: %v", err)
+			if b, err := w.Msg.Pack(); err != nil || len(b) > 1232 {
+				t.Fatalf("pack: %d %v", len(b), err)
 			}
 		}
 		// The budget of the one source above is spent after a few inputs;
 		// the answer is also built and sized without it.
 		if resp, _ := h.build(req); resp != nil {
-			if n := Limit(resp, req, true).Len(); n > 1232 {
-				t.Fatalf("built answer %d bytes", n)
-			}
-			if _, err := resp.Pack(); err != nil {
-				t.Fatalf("pack built: %v", err)
+			b, err := Limit(resp, req, true).Pack()
+			if err != nil || len(b) > maxSize(req, true) {
+				t.Fatalf("built answer %d bytes, %v", len(b), err)
 			}
 		}
 	})
@@ -572,5 +573,49 @@ func TestNotImplementedWithinBudget(t *testing.T) {
 	}
 	if got != 5 {
 		t.Fatalf("answers %d, want 5", got)
+	}
+}
+
+func TestLargeAnswerNotCached(t *testing.T) {
+	up := &fakeUp{healthy: true, answer: txtAnswer(20)}
+	h := NewHandler(per("debian11"), newLim(), up)
+	for i := 0; i < 2; i++ {
+		if r := serve(t, h, tcpFrom(), query("big.example.", dns.TypeTXT, dns.ClassINET)); r == nil || len(r.Answer) != 20 {
+			t.Fatalf("%v", r)
+		}
+	}
+	if up.calls.Load() != 2 {
+		t.Fatalf("upstream calls %d", up.calls.Load())
+	}
+	up.answer = txtAnswer(10)
+	for i := 0; i < 2; i++ {
+		serve(t, h, tcpFrom(), query("mid.example.", dns.TypeTXT, dns.ClassINET))
+	}
+	if up.calls.Load() != 3 {
+		t.Fatalf("upstream calls %d", up.calls.Load())
+	}
+}
+
+func TestCNAMEToNoData(t *testing.T) {
+	up := &fakeUp{healthy: true, answer: func(q *dns.Msg) *dns.Msg {
+		m := new(dns.Msg)
+		m.SetReply(q)
+		m.Answer = []dns.RR{&dns.CNAME{Hdr: dns.RR_Header{Name: q.Question[0].Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 3600}, Target: "y.example."}}
+		m.Ns = []dns.RR{soaRR(86400, 86400)}
+		return m
+	}}
+	h := NewHandler(per("debian11"), newLim(), up)
+	t0 := time.Now()
+	h.now = func() time.Time { return t0 }
+	serve(t, h, udpFrom(), query("x.example.", dns.TypeAAAA, dns.ClassINET))
+	h.now = func() time.Time { return t0.Add(899 * time.Second) }
+	r := serve(t, h, udpFrom(), query("x.example.", dns.TypeAAAA, dns.ClassINET))
+	if r == nil || len(r.Answer) != 1 || len(r.Ns) != 1 || r.Ns[0].Header().Ttl != 1 || up.calls.Load() != 1 {
+		t.Fatalf("calls %d: %v", up.calls.Load(), r)
+	}
+	h.now = func() time.Time { return t0.Add(900 * time.Second) }
+	serve(t, h, udpFrom(), query("x.example.", dns.TypeAAAA, dns.ClassINET))
+	if up.calls.Load() != 2 {
+		t.Fatalf("upstream calls %d after 900 s", up.calls.Load())
 	}
 }

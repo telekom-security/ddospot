@@ -38,7 +38,7 @@ type Handler struct {
 
 // NewHandler returns a Handler; up nil turns recursion off.
 func NewHandler(p *persona.Persona, lim *limit.Limiter, up Upstream) *Handler {
-	return &Handler{p: p, lim: lim, up: up, cache: newCache(maxEntries), now: time.Now}
+	return &Handler{p: p, lim: lim, up: up, cache: newCache(maxEntries, maxBytes), now: time.Now}
 }
 
 // Accept is the MsgAcceptFunc for the dns.Server of the Handler: it
@@ -142,7 +142,7 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	resp, miss := h.build(r)
 	if miss == nil {
 		resp = Limit(resp, r, udp)
-		if h.admit(src, sample, resp.Len(), udp) {
+		if h.admit(src, sample, packedLen(resp), udp) {
 			w.WriteMsg(resp)
 		}
 		return
