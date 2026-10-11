@@ -68,7 +68,7 @@ Every request is counted against these budgets:
   persona does not answer, or an SSDP request without the headers the
   daemon needs.
 - The 21st packet of a network blocks the network: none of its addresses
-  gets an answer over UDP from any service any more. Sources in such a
+  gets no answer over UDP from any service. Sources in such a
   network are not written as scanners, except sources of DNS over TCP
   (see below).
 - The state of a source or a network lasts until it has sent no packet for
@@ -93,9 +93,9 @@ from those over UDP:
   its network. It also gets its answers when its network is blocked, and
   it is written as a scanner there too.
 - The budget for all answers together applies to UDP only.
-- Questions over TCP that go to Quad9 have an upstream share of their own,
+- Queries over TCP that go to Quad9 have an upstream share of their own,
   2 queries per second with a burst of 5, within the rate limit of all
-  queries to Quad9. A question beyond that share gets SERVFAIL.
+  queries to Quad9. A query beyond that share gets SERVFAIL.
 - At most 256 TCP connections are open at a time, 4 of them from one
   address. Further connections are closed right after they are accepted.
 
@@ -211,8 +211,8 @@ Fields of the service, taken from the first request:
 |---------|--------|
 | CHARGEN | none |
 | DNS | `opcode`; with a question also `dns_name`, `dns_type`, `dns_cls` |
-| NTP | `mode`: `DATA` (client), `CONTROL` (READVAR) or `MONLIST` |
-| SSDP | `st` (search target), `mx` (the MX header as sent) |
+| NTP | `mode`: `DATA` (client), `CONTROL` (mode 6), `MONLIST` (mode 7) or `OTHER` (any other mode, or a datagram too short to tell) |
+| SSDP | `st` (search target), `mx` (the MX header as sent), each cut to 256 bytes |
 
 ### Target lines
 

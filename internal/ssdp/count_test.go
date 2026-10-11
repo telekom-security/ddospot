@@ -3,9 +3,11 @@ package ssdp
 import (
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/t3chn0m4g3/ddospot/internal/limit"
 	"github.com/t3chn0m4g3/ddospot/internal/persona"
@@ -103,5 +105,20 @@ func TestOverSourceBuildsNothing(t *testing.T) {
 	lim.Flush()
 	if len(obs.ended) != 1 || obs.ended[0].Packets != 12 {
 		t.Fatalf("ended %+v, want one source with 12 packets", obs.ended)
+	}
+}
+
+func TestLongFieldsCutInSample(t *testing.T) {
+	st := "urn:" + strings.Repeat("a", 1986)
+	src := countedTarget(t, msearch(st, "3"), "192.0.2.78:40000")
+	got, _ := src.Sample.Fields["st"].(string)
+	if len(got) != 256 || !strings.HasPrefix(st, got) {
+		t.Fatalf("st of %d bytes, want the first 256", len(got))
+	}
+	multi := strings.Repeat("ä", 1000)
+	src = countedTarget(t, msearch(multi, "3"), "192.0.2.79:40000")
+	got, _ = src.Sample.Fields["st"].(string)
+	if len(got) > 256 || !utf8.ValidString(got) || len(got) < 254 {
+		t.Fatalf("st of %d bytes, valid %v", len(got), utf8.ValidString(got))
 	}
 }

@@ -164,6 +164,7 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		return
 	}
 	if h.lim.Over(limit.DNS, src, tcp) {
+		// Counted, never answered: the result of Admit does not matter.
 		sample.RespSize = maxSize(r, udp)
 		h.lim.Admit(limit.DNS, src, sample, 0, 0)
 		return

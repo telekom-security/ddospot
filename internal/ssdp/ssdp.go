@@ -392,11 +392,22 @@ func (s *Server) handle(req []byte, src netip.AddrPort) {
 	for _, d := range resp {
 		sum += len(d)
 	}
-	sample := limit.Sample{Transport: "udp", Req: req, RespSize: sum, Fields: map[string]any{"st": r.ST, "mx": r.MXRaw}}
+	sample := limit.Sample{Transport: "udp", Req: req, RespSize: sum, Fields: map[string]any{"st": cutField(r.ST), "mx": cutField(r.MXRaw)}}
 	if !s.lim.Admit(limit.SSDP, src, sample, len(resp), sum) {
 		return
 	}
 	s.schedule(r, resp, src)
+}
+
+// maxField is the longest st or mx value kept in an event.
+const maxField = 256
+
+// cutField cuts v to at most maxField bytes, at a character boundary.
+func cutField(v string) string {
+	if len(v) <= maxField {
+		return v
+	}
+	return strings.ToValidUTF8(v[:maxField], "")
 }
 
 // count registers a datagram that is not answered; st and mx are empty
@@ -404,7 +415,7 @@ func (s *Server) handle(req []byte, src netip.AddrPort) {
 func (s *Server) count(req []byte, src netip.AddrPort, r Request, ok bool) {
 	f := map[string]any{"st": "", "mx": ""}
 	if ok {
-		f["st"], f["mx"] = r.ST, r.MXRaw
+		f["st"], f["mx"] = cutField(r.ST), cutField(r.MXRaw)
 	}
 	s.lim.Admit(limit.SSDP, src, limit.Sample{Transport: "udp", Req: req, Fields: f}, 0, 0)
 }
