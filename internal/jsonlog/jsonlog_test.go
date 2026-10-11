@@ -42,13 +42,60 @@ func TestWriteBudget(t *testing.T) {
 	now := time.Unix(0, 0)
 	w := mustOpen(t, d, func() time.Time { return now })
 	for i := 0; i < 1000; i++ {
-		w.Write("targets.log", map[string]any{"i": i})
+		w.Write("ntpot.log", map[string]any{"i": i})
 	}
 	if got := w.Dropped(); got != 600 {
 		t.Fatalf("dropped %d, want 600", got)
 	}
 	if got := w.Dropped(); got != 0 {
 		t.Fatalf("counter not reset: %d", got)
+	}
+}
+
+func TestTargetsHaveOwnBudget(t *testing.T) {
+	d := t.TempDir()
+	now := time.Unix(0, 0)
+	w := mustOpen(t, d, func() time.Time { return now })
+	scanners := []string{"chargenpot.log", "dnspot.log", "ntpot.log", "ssdpot.log"}
+	for i := 0; i < 1000; i++ {
+		w.Write(scanners[i%4], map[string]any{"i": i})
+	}
+	for i := 0; i < 50; i++ {
+		w.Write("targets.log", map[string]any{"i": i})
+	}
+	if got := w.Dropped(); got != 600 {
+		t.Fatalf("dropped %d, want 600", got)
+	}
+	w.Close()
+	b, _ := os.ReadFile(filepath.Join(d, "targets.log"))
+	if n := strings.Count(string(b), "\n"); n != 50 {
+		t.Fatalf("%d target lines, want 50", n)
+	}
+}
+
+func TestTargetsBudget(t *testing.T) {
+	d := t.TempDir()
+	now := time.Unix(0, 0)
+	w := mustOpen(t, d, func() time.Time { return now })
+	defer w.Close()
+	for i := 0; i < 2500; i++ {
+		w.Write("targets.log", map[string]any{"i": i})
+	}
+	if got := w.Dropped(); got != 500 {
+		t.Fatalf("dropped %d, want 500", got)
+	}
+	if w.Allow("targets.log") {
+		t.Fatal("Allow with the targets budget spent")
+	}
+	if !w.Allow("ntpot.log") {
+		t.Fatal("scanner budget untouched, Allow false")
+	}
+	if got := w.Dropped(); got != 1 {
+		t.Fatalf("dropped %d, want 1", got)
+	}
+	now = now.Add(time.Second)
+	if !w.Allow("targets.log") {
+		t.Fatal("no refill after one second")
 	}
 }
 
@@ -183,9 +230,9 @@ func TestBudgetCheckedBeforeEncoding(t *testing.T) {
 	w := mustOpen(t, t.TempDir(), func() time.Time { return now })
 	defer w.Close()
 	for i := 0; i < 400; i++ {
-		w.Write("targets.log", map[string]any{"i": i})
+		w.Write("ntpot.log", map[string]any{"i": i})
 	}
-	w.Write("targets.log", map[string]any{"c": make(chan int)})
+	w.Write("ntpot.log", map[string]any{"c": make(chan int)})
 	if d, e := w.Dropped(), w.Errors(); d != 1 || e != 0 {
 		t.Fatalf("dropped %d errors %d, want 1 and 0", d, e)
 	}
@@ -207,7 +254,7 @@ func TestManyWritesAtOneInstant(t *testing.T) {
 	ev := map[string]any{"src_ip": "192.0.2.1", "req_pkt": strings.Repeat("A", 684), "packets": 12, "dns_name": "example.org."}
 	start := time.Now()
 	for i := 0; i < 200000; i++ {
-		w.Write("targets.log", ev)
+		w.Write("ntpot.log", ev)
 	}
 	if el := time.Since(start); el >= time.Second {
 		t.Fatalf("200000 writes took %v", el)
@@ -216,7 +263,7 @@ func TestManyWritesAtOneInstant(t *testing.T) {
 		t.Fatalf("dropped %d", got)
 	}
 	w.Close()
-	b, _ := os.ReadFile(filepath.Join(d, "targets.log"))
+	b, _ := os.ReadFile(filepath.Join(d, "ntpot.log"))
 	if n := strings.Count(string(b), "\n"); n != 400 {
 		t.Fatalf("lines %d, want 400", n)
 	}
@@ -227,21 +274,24 @@ func TestAllow(t *testing.T) {
 	now := time.Unix(0, 0)
 	w := mustOpen(t, d, func() time.Time { return now })
 	for i := 0; i < 1000; i++ {
-		if !w.Allow("targets.log") {
+		if !w.Allow("ntpot.log") || !w.Allow("targets.log") {
 			t.Fatal("not allowed with a full budget")
 		}
 	}
 	for i := 0; i < 400; i++ {
-		w.Write("targets.log", map[string]any{"i": i})
+		w.Write("ntpot.log", map[string]any{"i": i})
 	}
 	if got := w.Dropped(); got != 0 {
 		t.Fatalf("Allow took budget: dropped %d", got)
 	}
-	if w.Allow("targets.log") || w.Allow("ntpot.log") {
+	if w.Allow("ntpot.log") || w.Allow("dnspot.log") {
 		t.Fatal("allowed with the budget spent")
 	}
 	if got := w.Dropped(); got != 2 {
 		t.Fatalf("dropped %d, want 2", got)
+	}
+	if !w.Allow("targets.log") {
+		t.Fatal("targets budget not separate")
 	}
 	w.Close()
 	if w.Allow("targets.log") {

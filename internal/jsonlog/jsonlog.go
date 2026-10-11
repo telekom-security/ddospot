@@ -1,5 +1,6 @@
 // Package jsonlog writes one JSON object per line into the five log files
-// of the honeypot, with a line budget.
+// of the honeypot, with line budgets: one shared by the four scanner files
+// and one for targets.log.
 package jsonlog
 
 import (
@@ -14,8 +15,10 @@ import (
 )
 
 const (
-	lineRate  = 200
-	lineBurst = 400
+	lineRate         = 200
+	lineBurst        = 400
+	targetsLineBurst = 2000
+	targetsFile      = "targets.log"
 )
 
 var allowed = map[string]bool{
@@ -23,7 +26,7 @@ var allowed = map[string]bool{
 	"dnspot.log":     true,
 	"ntpot.log":      true,
 	"ssdpot.log":     true,
-	"targets.log":    true,
+	targetsFile:      true,
 }
 
 // Time formats t as UTC "2006-01-02 15:04:05.000000".
@@ -38,7 +41,8 @@ type Writer struct {
 	now     func() time.Time
 	mu      sync.Mutex
 	files   map[string]*os.File
-	bucket  *bucket.Bucket
+	scanner *bucket.Bucket
+	targets *bucket.Bucket
 	dropped uint64
 	errors  uint64
 	closed  bool
@@ -51,11 +55,21 @@ func Open(dir string, now func() time.Time) (*Writer, error) {
 		return nil, err
 	}
 	return &Writer{
-		dir:    dir,
-		now:    now,
-		files:  map[string]*os.File{},
-		bucket: bucket.New(lineRate, lineBurst),
+		dir:     dir,
+		now:     now,
+		files:   map[string]*os.File{},
+		scanner: bucket.New(lineRate, lineBurst),
+		targets: bucket.New(lineRate, targetsLineBurst),
 	}, nil
+}
+
+// budget returns the line budget of file: targets.log has its own, the four
+// scanner files share one.
+func (w *Writer) budget(file string) *bucket.Bucket {
+	if file == targetsFile {
+		return w.targets
+	}
+	return w.scanner
 }
 
 // Write appends ev as one line to file, which must be one of the five log
@@ -75,7 +89,8 @@ func (w *Writer) Write(file string, ev map[string]any) {
 		return
 	}
 	now := w.now()
-	if !w.bucket.Can(1, now) {
+	b := w.budget(file)
+	if !b.Can(1, now) {
 		w.dropped++
 		return
 	}
@@ -96,7 +111,7 @@ func (w *Writer) Write(file string, ev map[string]any) {
 		}
 		w.files[file] = f
 	}
-	w.bucket.Take(1, now)
+	b.Take(1, now)
 	if n, err := f.Write(buf.Bytes()); err != nil || n != buf.Len() {
 		w.errors++
 	}
@@ -116,7 +131,7 @@ func (w *Writer) Allow(file string) bool {
 	if w.closed {
 		return false
 	}
-	if !w.bucket.Can(1, w.now()) {
+	if !w.budget(file).Can(1, w.now()) {
 		w.dropped++
 		return false
 	}

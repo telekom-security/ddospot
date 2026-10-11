@@ -174,7 +174,8 @@ All log files are in `DDOSPOT_LOG_DIR` (default `/var/log/ddospot`). Each
 line is one JSON object. Files are opened in append mode, so log rotation
 with `copytruncate` works. Times are UTC in the form
 `YYYY-MM-DD HH:MM:SS.ffffff`. At most 200 lines per second are written
-(burst 400); ddospot prints the number of lines left out once a minute on
+for the four scanner files together (burst 400) and 200 for `targets.log`
+(burst 2000); ddospot prints the number of lines left out once a minute on
 stdout.
 
 ### Scanner lines
@@ -188,6 +189,7 @@ per scanner and service, with the first request of the source:
 | `role` | `scanner` |
 | `src_ip`, `src_port` | address and port of the source |
 | `proto` | `udp`, or `tcp` for DNS over TCP |
+| `verified` | true only for DNS over TCP, where the source completed a handshake; UDP sources are not verified, because UDP source addresses can be forged |
 | `packets` | packets of the source to this service so far |
 | `req_size` | size of the first request in bytes |
 | `req_pkt` | the first request, base64, at most its first 512 bytes; DNS: the request as parsed and packed again |

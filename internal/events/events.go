@@ -60,7 +60,7 @@ func seconds(first, last time.Time) int {
 }
 
 // Scanner writes a source that stayed within its budget into the log file
-// of its pot.
+// of its pot. verified is true for a source that completed a TCP handshake.
 func (l *Logger) Scanner(s limit.Source) {
 	if !l.w.Allow(Files[s.Proto]) {
 		return
@@ -73,6 +73,7 @@ func (l *Logger) Scanner(s limit.Source) {
 	ev["packets"] = s.Packets
 	ev["proto"] = s.Sample.Transport
 	ev["persona"] = l.persona
+	ev["verified"] = s.Sample.Transport == "tcp"
 	ev["resp_size"] = s.Sample.RespSize
 	l.w.Write(Files[s.Proto], ev)
 }

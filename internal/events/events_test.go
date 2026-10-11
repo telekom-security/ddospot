@@ -66,14 +66,51 @@ func TestScannerFields(t *testing.T) {
 		t.Fatalf("%v", ev)
 	}
 	e := ev[0]
-	wantKeys(t, e, "time", "src_ip", "src_port", "role", "packets", "proto", "persona", "req_size", "resp_size", "req_pkt", "dns_name", "dns_type")
+	wantKeys(t, e, "time", "src_ip", "src_port", "role", "packets", "proto", "persona", "verified", "req_size", "resp_size", "req_pkt", "dns_name", "dns_type")
 	if e["time"] != "2026-10-11 09:08:07.123456" || e["src_ip"] != "2001:db8::7" || e["src_port"] != float64(5353) ||
 		e["packets"] != float64(3) || e["proto"] != "tcp" || e["persona"] != "ubuntu2204" || e["req_size"] != float64(700) ||
 		e["resp_size"] != float64(99) || e["req_pkt"] != base64.StdEncoding.EncodeToString([]byte("abc")) || e["dns_name"] != "example.org." {
 		t.Fatalf("%v", e)
 	}
+	if e["verified"] != true {
+		t.Fatalf("verified %v for tcp", e["verified"])
+	}
 	if len(fields) != 2 {
 		t.Fatalf("sample fields changed: %v", fields)
+	}
+}
+
+func TestVerifiedOnlyForTCPScanners(t *testing.T) {
+	d := t.TempDir()
+	w, _ := jsonlog.Open(d, time.Now)
+	l := New(w, "debian11")
+	for _, c := range []struct {
+		p limit.Proto
+		t string
+	}{{limit.DNS, "tcp"}, {limit.DNS, "udp"}, {limit.NTP, "udp"}, {limit.SSDP, "udp"}, {limit.Chargen, "udp"}} {
+		l.Scanner(limit.Source{Proto: c.p, Addr: netip.MustParseAddr("192.0.2.1"), Port: 4000, First: time.Unix(0, 0), Last: time.Unix(0, 0), Packets: 1,
+			Sample: limit.Sample{Transport: c.t, Req: []byte{1}, ReqSize: 1}})
+	}
+	l.TargetStart(limit.Source{Proto: limit.DNS, Addr: netip.MustParseAddr("192.0.2.1"), Port: 4000, First: time.Unix(0, 0), Last: time.Unix(0, 0), Packets: 6,
+		Sample: limit.Sample{Transport: "tcp", Req: []byte{1}, ReqSize: 1}})
+	l.NetStart(limit.Net{Prefix: netip.MustParsePrefix("192.0.2.0/24"), First: time.Unix(0, 0), Last: time.Unix(0, 0), Packets: 21, Sources: 1})
+	w.Close()
+	want := map[string][]any{"dnspot.log": {true, false}, "ntpot.log": {false}, "ssdpot.log": {false}, "chargenpot.log": {false}}
+	for f, vals := range want {
+		got := readJSON(t, filepath.Join(d, f))
+		if len(got) != len(vals) {
+			t.Fatalf("%s: %v", f, got)
+		}
+		for i, e := range got {
+			if v, ok := e["verified"]; !ok || v != vals[i] {
+				t.Errorf("%s line %d: verified %v, want %v", f, i, v, vals[i])
+			}
+		}
+	}
+	for _, e := range readJSON(t, filepath.Join(d, "targets.log")) {
+		if _, ok := e["verified"]; ok {
+			t.Errorf("target event carries verified: %v", e)
+		}
 	}
 }
 
@@ -152,8 +189,11 @@ func TestDroppedEventsAreNotBuilt(t *testing.T) {
 	src := limit.Source{Proto: limit.DNS, Addr: netip.MustParseAddr("192.0.2.1"), Port: 4000, First: frozen, Last: frozen, Packets: 1,
 		Sample: limit.Sample{Transport: "udp", Req: make([]byte, 512), ReqSize: 700, Fields: map[string]any{"dns_name": "example.org."}}}
 	n := limit.Net{Prefix: netip.MustParsePrefix("192.0.2.0/24"), First: frozen, Last: frozen, Packets: 1, Sources: 1}
-	for i := 0; i < 400; i++ {
+	for i := 0; i < 2000; i++ {
 		l.NetStart(n)
+	}
+	for i := 0; i < 400; i++ {
+		l.Scanner(src)
 	}
 	w.Dropped()
 	calls := []func(){func() { l.Scanner(src) }, func() { l.TargetStart(src) }, func() { l.TargetEnd(src) },

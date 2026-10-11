@@ -335,9 +335,9 @@ func TestReport(t *testing.T) {
 	if b.Len() != 0 {
 		t.Fatalf("%q", b.String())
 	}
-	w.Write("targets.log", map[string]any{"x": json.RawMessage("{")})
+	w.Write("ntpot.log", map[string]any{"x": json.RawMessage("{")})
 	for i := 0; i < 403; i++ {
-		w.Write("targets.log", map[string]any{"i": i})
+		w.Write("ntpot.log", map[string]any{"i": i})
 	}
 	report(&b, w)
 	if b.String() != "log lines dropped: 3\nlog write errors: 1\n" {
