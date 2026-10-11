@@ -37,43 +37,59 @@ ddospot sorts every source into one of two roles:
   `chargenpot.log`, `dnspot.log`, `ntpot.log` or `ssdpot.log`, with `src_ip`
   and `role` `scanner`.
 - **Target**: the forged source of an attack. Its requests come in large
-  numbers, so it soon uses up its budget. Targets are written into
+  numbers, so it soon goes beyond its budget. Targets are written into
   `targets.log` with `target_ip` and `role` `target`.
 
 A new source is held for 60 seconds (`DDOSPOT_CLASSIFY_SECONDS`) before
 ddospot decides. During the hold it gets answers within its budget. A source
 that stays within its budget until the hold ends is a scanner, and one line
-with its first request is written for it. A source that goes beyond its
-budget, during the hold or later, is a target: `targets.log` gets an
-`attack_start` line, and an `attack_end` line once the source has been quiet
-for 10 minutes. The same happens for networks with `net_start` and
-`net_end`.
+with its first request is written for it. A source that sends more packets
+than its budget, during the hold or later, is a target: `targets.log` gets
+an `attack_start` line, and an `attack_end` line once the source has been
+quiet for 10 minutes. The same happens for networks with `net_start` and
+`net_end`. Sources of DNS over TCP are never targets (see below).
 
 ## Response budgets
 
-Every answer is counted against these budgets:
+Every request is counted against these budgets:
 
 | Budget | Default |
 |--------|---------|
-| per source address and service | 5 answers |
-| per network (IPv4 /24, IPv6 /48), across all services | 20 answers |
+| per source address and service | the first 5 packets may be answered |
+| per network (IPv4 /24, IPv6 /48), across all services | the first 20 packets may be answered |
 | all answers together | 50 answers and 64 KiB per second |
 
-- A source that has used its budget gets no more answers from that service
-  and becomes a target.
-- A network that has used its budget gets no more answers from any service
-  for any of its addresses. Sources in such a network are not written as
-  scanners.
-- The budget for all answers together applies to UDP. DNS answers over TCP
-  count against the source and network budgets only.
+- The source and network budgets count packets, whether they were answered
+  or not. A packet within these budgets is answered only if the budget for
+  all answers together has room for its answer.
+- The sixth packet of a source makes it a target; from then on it gets no
+  more answers from that service.
+- The 21st packet of a network blocks the network: none of its addresses
+  gets an answer from any service any more. Sources in such a network are
+  not written as scanners.
 - The state of a source or a network lasts until it has sent no packet for
   10 minutes; every packet starts the 10 minutes again. Then it is removed,
   and a target gets its end line.
 - A scanner that comes back after that starts with a full budget and gets
   answers again. Hosts that check a service now and then send a few packets
   each time and see a working service each time.
-- The tables of sources and networks have a fixed size. When they are full,
-  new sources get no answer until entries expire.
+- The tables hold at most 200000 sources and 200000 networks. When they are
+  full, new sources get no answer until entries expire. Full tables take up
+  to about 300 MiB of memory.
+
+### DNS over TCP
+
+A TCP connection starts with a handshake, so the source address of a query
+over TCP is the address of the sender. ddospot counts these queries apart
+from those over UDP:
+
+- A source gets answers to its first 5 queries over TCP; further queries
+  get no answer until the source has been quiet for 10 minutes.
+- A source over TCP is never a target, and its queries are not counted for
+  its network. It also gets its answers when its network is blocked.
+- The budget for all answers together applies to UDP only.
+- At most 256 TCP connections are open at a time, 4 of them from one
+  address. Further connections are closed right after they are accepted.
 
 ## Services
 
@@ -92,15 +108,18 @@ DNS answers on UDP and TCP port 53.
   connections to port 853/tcp. The certificate of `dns.quad9.net` is checked
   against the CA bundle of the image, with TLS 1.2 or later. Answers are
   cached, and the queries to Quad9 have a rate limit of their own.
-- **Health of the upstream.** ddospot asks Quad9 once a minute. Until the
-  first of these probes succeeds, and after three failed probes in a row,
-  questions of class IN are answered with REFUSED.
+- **Health of the upstream.** ddospot asks Quad9 once a minute while it
+  answers, and every 10 seconds while it does not. Until the first of these
+  probes succeeds, and after three failed probes in a row, questions of
+  class IN are answered with REFUSED. Each change is printed on stdout.
 - **`DDOSPOT_DNS_RECURSION=off`** turns recursion off; questions of class IN
   are then always answered with REFUSED.
 - **CHAOS class.** `version.bind` is answered with the version string of the
   persona's name server, also with recursion off; BIND personas also answer
   `hostname.bind` with the host name.
-- **ANY** is answered with a single HINFO record, as RFC 8482 describes.
+- **ANY** questions of class IN are answered with a single HINFO record,
+  as RFC 8482 describes, while recursion is on and Quad9 answers; otherwise
+  they get REFUSED like the other questions of class IN.
 - **Answer size.** UDP answers are kept small: an answer that does not fit
   the UDP size of the request (the plain DNS size, or the EDNS size the
   client offers, within a limit) is sent with the truncation flag and without
@@ -198,7 +217,7 @@ service:
 | `target_ip`, `target_port` | source address and port of the requests, that is the target |
 | `pot` | `chargen`, `dns`, `ntp` or `ssdp` |
 | `dest_port` | port of the service: 19, 53, 123 or 1900 |
-| `proto` | `udp`, or `tcp` for DNS over TCP |
+| `proto` | `udp` |
 | `packets` | packets from the target to this service so far |
 | `first_seen` | time of the first packet |
 | `last_seen` | time of the last packet (`attack_end` only) |
@@ -208,7 +227,7 @@ service:
 
 The fields of the service (see above) are added as well.
 
-`net_start` and `net_end` are written for a network that used its budget:
+`net_start` and `net_end` are written for a blocked network:
 
 | Field | Content |
 |-------|---------|
@@ -230,7 +249,13 @@ scanner lines of the sources still in their hold.
 
 ddospot prints `ddospot v<version> persona=<id>` at the start, and once a
 minute the number of log lines left out by the line budget or lost to write
-errors, when there were any.
+errors, when there were any. With recursion on it prints a line for every
+change of the health of Quad9:
+
+```
+dns upstream: answering, class IN resolved
+dns upstream: not answering (<last error>), class IN answered with REFUSED
+```
 
 ## Settings
 
@@ -246,8 +271,8 @@ addresses.
 
 ## Running it
 
-The image is built `FROM scratch` and contains only the binary and a CA
-bundle. It runs as uid and gid 2000, works with a read-only root file
+The image is built `FROM scratch` and contains only the binary, a CA
+bundle and an empty log folder owned by uid 2000. It runs as uid and gid 2000, works with a read-only root file
 system, writes its logs to `/var/log/ddospot` and stops within 2 seconds on
 SIGTERM.
 
