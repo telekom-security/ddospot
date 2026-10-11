@@ -3,6 +3,7 @@ package dnspot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"net"
 	"strings"
@@ -449,14 +450,93 @@ func (e *errUp) Exchange(context.Context, *dns.Msg) (*dns.Msg, error) {
 	return nil, errors.New("no answer")
 }
 
-func TestUpstreamErrorNoAnswer(t *testing.T) {
+func TestServfailOnUpstreamError(t *testing.T) {
 	up := &errUp{}
-	h := NewHandler(per("debian11"), newLim(), up)
-	if r := serve(t, h, udpFrom(), query("x.example.", dns.TypeA, dns.ClassINET)); r != nil {
-		t.Fatalf("%v", r)
+	p := per("debian11")
+	h := NewHandler(p, newLim(), up)
+	for _, edns := range []bool{false, true} {
+		for _, w := range []*testutil.DNSRecorder{udpFrom(), tcpFrom()} {
+			m := query("X.example.", dns.TypeA, dns.ClassINET)
+			m.CheckingDisabled = true
+			if edns {
+				m.SetEdns0(4096, false)
+			}
+			r := serve(t, h, w, m)
+			if r == nil || r.Rcode != dns.RcodeServerFailure || !r.RecursionAvailable || !r.Response ||
+				r.Id != m.Id || !r.RecursionDesired || !r.CheckingDisabled ||
+				len(r.Question) != 1 || r.Question[0] != m.Question[0] || len(r.Answer) != 0 || len(r.Ns) != 0 {
+				t.Fatalf("edns=%v %T: %v", edns, w.Remote, r)
+			}
+			o := r.IsEdns0()
+			if edns != (o != nil) || (o != nil && o.UDPSize() != p.DNS.EDNSSize) {
+				t.Fatalf("edns=%v: opt %v", edns, o)
+			}
+			if b, err := r.Pack(); err != nil || len(b) > maxSize(m, true) {
+				t.Fatalf("packed %d %v", len(b), err)
+			}
+		}
 	}
-	if up.calls.Load() != 1 {
+	if up.calls.Load() != 4 {
 		t.Fatalf("upstream calls %d", up.calls.Load())
+	}
+}
+
+func TestTCPUpstreamShare(t *testing.T) {
+	up := &fakeUp{healthy: true, answer: txtAnswer(1)}
+	h := NewHandler(per("debian11"), newLim(), up)
+	h.now = func() time.Time { return now }
+	for i := 0; i < 6; i++ {
+		r := serve(t, h, tcpFrom(), query(fmt.Sprintf("t%d.example.", i), dns.TypeA, dns.ClassINET))
+		want := dns.RcodeSuccess
+		if i == 5 {
+			want = dns.RcodeServerFailure
+		}
+		if r == nil || r.Rcode != want {
+			t.Fatalf("query %d: %v", i+1, r)
+		}
+	}
+	if up.calls.Load() > 5 {
+		t.Fatalf("upstream calls %d", up.calls.Load())
+	}
+	r := serve(t, h, udpFrom(), query("u.example.", dns.TypeA, dns.ClassINET))
+	if r == nil || r.Rcode != dns.RcodeSuccess || up.calls.Load() != 6 {
+		t.Fatalf("udp: %v, upstream calls %d", r, up.calls.Load())
+	}
+	h.now = func() time.Time { return now.Add(time.Second) }
+	if r := serve(t, h, tcpFrom(), query("t9.example.", dns.TypeA, dns.ClassINET)); r == nil || r.Rcode != dns.RcodeSuccess {
+		t.Fatalf("after a second: %v", r)
+	}
+}
+
+func TestOverSkipsUpstream(t *testing.T) {
+	for _, tcp := range []bool{false, true} {
+		obs := &targetCount{}
+		up := &fakeUp{healthy: true, answer: txtAnswer(1)}
+		h := NewHandler(per("debian11"), limit.New(limit.Defaults(time.Minute), time.Now, obs), up)
+		w := udpFrom()
+		if tcp {
+			w = tcpFrom()
+		}
+		for i := 0; i < 5; i++ {
+			if serve(t, h, w, query("version.bind.", dns.TypeTXT, dns.ClassCHAOS)) == nil {
+				t.Fatalf("tcp=%v: query %d not answered", tcp, i+1)
+			}
+		}
+		w.Msg = nil
+		if r := serve(t, h, w, query("o.example.", dns.TypeA, dns.ClassINET)); r != nil {
+			t.Fatalf("tcp=%v: %v", tcp, r)
+		}
+		if up.calls.Load() != 0 {
+			t.Fatalf("tcp=%v: upstream calls %d", tcp, up.calls.Load())
+		}
+		if want := int32(1); tcp {
+			want = 0
+			if obs.n.Load() != want {
+				t.Fatalf("tcp: target_start %d", obs.n.Load())
+			}
+		} else if obs.n.Load() != want {
+			t.Fatalf("udp: request not counted, target_start %d", obs.n.Load())
+		}
 	}
 }
 

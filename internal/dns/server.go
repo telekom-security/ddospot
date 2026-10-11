@@ -10,10 +10,12 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
 
+	"github.com/t3chn0m4g3/ddospot/internal/bucket"
 	"github.com/t3chn0m4g3/ddospot/internal/limit"
 	"github.com/t3chn0m4g3/ddospot/internal/persona"
 )
@@ -24,6 +26,8 @@ const Port = 53
 const (
 	anyTTL      = 3789 // TTL of the HINFO answer to ANY (RFC 8482)
 	resolveTime = 3 * time.Second
+	tcpUpRate   = 2 // upstream queries per second for questions over TCP
+	tcpUpBurst  = 5
 )
 
 // Handler answers DNS requests as persona p within the budgets of lim.
@@ -34,11 +38,19 @@ type Handler struct {
 	up    Upstream // nil = recursion off
 	cache *cache
 	now   func() time.Time
+
+	mu    sync.Mutex     // guards tcpUp
+	tcpUp *bucket.Bucket // upstream share of questions over TCP
 }
 
 // NewHandler returns a Handler; up nil turns recursion off.
 func NewHandler(p *persona.Persona, lim *limit.Limiter, up Upstream) *Handler {
-	return &Handler{p: p, lim: lim, up: up, cache: newCache(maxEntries, maxBytes), now: time.Now}
+	return &Handler{
+		p: p, lim: lim, up: up,
+		cache: newCache(maxEntries, maxBytes),
+		now:   time.Now,
+		tcpUp: bucket.New(tcpUpRate, tcpUpBurst),
+	}
 }
 
 // Accept is the MsgAcceptFunc for the dns.Server of the Handler: it
@@ -122,7 +134,11 @@ func (h *Handler) recursion() bool { return h.up != nil && h.up.Healthy() }
 
 // ServeDNS answers one request. Every request is counted once by the
 // limiter; a request that needs the upstream is counted before the
-// upstream query, with the largest answer its transport allows.
+// upstream query, with the largest answer its transport allows. A source
+// over its budget is counted with no answer and causes no upstream query.
+// Questions over TCP use the upstream only within a share of their own.
+// When the upstream gives no answer, the answer is SERVFAIL; it is smaller
+// than the size counted for the request.
 func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if r.Response {
 		return
@@ -147,15 +163,37 @@ func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		return
 	}
+	if h.lim.Over(limit.DNS, src, tcp) {
+		sample.RespSize = maxSize(r, udp)
+		h.lim.Admit(limit.DNS, src, sample, 0, 0)
+		return
+	}
 	if !h.admit(src, sample, maxSize(r, udp), udp) {
 		return
 	}
-	e, err := h.resolve(r.Question[0], *miss)
-	if err != nil {
-		return
+	if tcp && !h.takeTCPUp() {
+		servfail(resp)
+	} else if e, err := h.resolve(r.Question[0], *miss); err != nil {
+		servfail(resp)
+	} else {
+		fill(resp, r.Question[0], e)
 	}
-	fill(resp, r.Question[0], e)
 	w.WriteMsg(Limit(resp, r, udp))
+}
+
+// takeTCPUp takes one upstream query from the share of questions over TCP.
+func (h *Handler) takeTCPUp() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.tcpUp.Take(1, h.now())
+}
+
+// servfail turns resp, the header part of an answer, into SERVFAIL. It
+// keeps the question and the OPT record.
+func servfail(resp *dns.Msg) {
+	resp.Rcode = dns.RcodeServerFailure
+	resp.RecursionAvailable = true
+	resp.Answer, resp.Ns = nil, nil
 }
 
 // admit counts one answer of size bytes. TCP answers are outside the

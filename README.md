@@ -107,7 +107,9 @@ DNS answers on UDP and TCP port 53.
   (`9.9.9.9` and `149.112.112.112`) over DNS over TLS. This needs outgoing
   connections to port 853/tcp. The certificate of `dns.quad9.net` is checked
   against the CA bundle of the image, with TLS 1.2 or later. Answers are
-  cached, and the queries to Quad9 have a rate limit of their own.
+  cached, and the queries to Quad9 have a rate limit of their own; questions
+  over TCP have a smaller share within it. A question Quad9 does not answer
+  in time, or that is over the rate limit, gets SERVFAIL.
 - **Health of the upstream.** ddospot asks Quad9 once a minute while it
   answers, and every 10 seconds while it does not. Until the first of these
   probes succeeds, and after three failed probes in a row, questions of
@@ -188,7 +190,7 @@ per scanner and service, with the first request of the source:
 | `proto` | `udp`, or `tcp` for DNS over TCP |
 | `packets` | packets of the source to this service so far |
 | `req_size` | size of the first request in bytes |
-| `req_pkt` | the first request, base64, at most its first 512 bytes |
+| `req_pkt` | the first request, base64, at most its first 512 bytes; DNS: the request as parsed and packed again |
 | `resp_size` | size of the answer to the first request; for a DNS question that goes to Quad9 the largest answer its transport allows |
 | `persona` | ID of the persona |
 
