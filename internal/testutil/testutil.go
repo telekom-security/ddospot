@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/miekg/dns"
+
 	"github.com/t3chn0m4g3/ddospot/internal/limit"
 )
 
@@ -47,3 +49,20 @@ func (NopObs) TargetStart(limit.Source) {}
 func (NopObs) TargetEnd(limit.Source)   {}
 func (NopObs) NetStart(limit.Net)       {}
 func (NopObs) NetEnd(limit.Net)         {}
+
+// DNSRecorder is a dns.ResponseWriter that keeps the last written message.
+type DNSRecorder struct {
+	Remote net.Addr // returned by RemoteAddr
+	Msg    *dns.Msg // the message given to WriteMsg, nil if none
+}
+
+func (r *DNSRecorder) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53}
+}
+func (r *DNSRecorder) RemoteAddr() net.Addr        { return r.Remote }
+func (r *DNSRecorder) WriteMsg(m *dns.Msg) error   { r.Msg = m; return nil }
+func (r *DNSRecorder) Write(b []byte) (int, error) { return len(b), nil }
+func (r *DNSRecorder) Close() error                { return nil }
+func (r *DNSRecorder) TsigStatus() error           { return nil }
+func (r *DNSRecorder) TsigTimersOnly(bool)         {}
+func (r *DNSRecorder) Hijack()                     {}
