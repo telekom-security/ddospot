@@ -495,3 +495,129 @@ func TestTCPAndUDPCountedApart(t *testing.T) {
 		t.Fatal("UDP packets counted for the TCP budget")
 	}
 }
+
+func TestOverMatchesAdmit(t *testing.T) {
+	l, c, _ := newTest(1000)
+	type pkt struct {
+		src string
+		tcp bool
+	}
+	var seq []pkt
+	for round := 0; round < 8; round++ {
+		for i := 1; i <= 4; i++ {
+			seq = append(seq, pkt{fmt.Sprintf("203.0.113.%d:1", i), false})
+		}
+		seq = append(seq, pkt{"203.0.113.100:1", true}, pkt{"198.51.100.1:1", false})
+	}
+	seq = append(seq, pkt{"203.0.113.200:1", false}, pkt{"[::ffff:198.51.100.1]:1", false})
+	for round := 0; round < 4; round++ { // 20 packets of 192.0.2.0/24, no source over its budget
+		for i := 1; i <= 5; i++ {
+			seq = append(seq, pkt{fmt.Sprintf("192.0.2.%d:1", i), false})
+		}
+	}
+	seq = append(seq, pkt{"192.0.2.1:1", false}, pkt{"192.0.2.9:1", false})
+	for i, p := range seq {
+		s := Sample{Transport: "udp"}
+		if p.tcp {
+			s.Transport = "tcp"
+		}
+		over := l.Over(NTP, ap(p.src), p.tcp)
+		if ok := l.Admit(NTP, ap(p.src), s, 0, 0); over == ok {
+			t.Fatalf("packet %d from %s (tcp=%v): Over=%v Admit=%v", i+1, p.src, p.tcp, over, ok)
+		}
+		c.t = c.t.Add(time.Second)
+	}
+}
+
+func TestOverChangesNothing(t *testing.T) {
+	l, _, r := newTest(1000)
+	for i := 0; i < 10; i++ {
+		l.Over(NTP, ap("192.0.2.1:1"), false)
+		l.Over(DNS, ap("192.0.2.2:1"), true)
+	}
+	if len(l.srcs) != 0 || len(l.tcpSrcs) != 0 || len(l.nets) != 0 || len(r.tstart) != 0 {
+		t.Fatalf("Over created state: srcs=%d tcp=%d nets=%d", len(l.srcs), len(l.tcpSrcs), len(l.nets))
+	}
+	for i := 0; i < 5; i++ {
+		if !l.Admit(NTP, ap("192.0.2.1:1"), Sample{}, 1, 48) {
+			t.Fatalf("answer %d refused after Over", i+1)
+		}
+	}
+}
+
+func TestTCPTableSeparate(t *testing.T) {
+	l, _, _ := newTest(3)
+	l.cfg.MaxTCPSources = 3
+	for i := 1; i <= 3; i++ {
+		if !l.Admit(DNS, netip.AddrPortFrom(netip.AddrFrom4([4]byte{198, 51, 100, byte(i)}), 1), tcpSample(), 0, 0) {
+			t.Fatalf("tcp source %d refused", i)
+		}
+	}
+	if l.Admit(DNS, ap("198.51.100.4:1"), tcpSample(), 0, 0) {
+		t.Fatal("tcp source answered with a full TCP table")
+	}
+	if !l.Over(DNS, ap("198.51.100.4:1"), true) {
+		t.Fatal("Over false for a new tcp source with a full TCP table")
+	}
+	if !l.Admit(DNS, ap("198.51.100.5:1"), Sample{Transport: "udp"}, 1, 60) {
+		t.Fatal("udp source refused with a full TCP table")
+	}
+}
+
+func TestNoPlaceholderNet(t *testing.T) {
+	l, _, _ := newTest(2)
+	l.Admit(NTP, ap("192.0.2.1:1"), Sample{}, 1, 48)
+	l.Admit(NTP, ap("192.0.2.2:1"), Sample{}, 1, 48)
+	if l.Admit(NTP, ap("198.51.100.1:1"), Sample{}, 1, 48) {
+		t.Fatal("answered with a full table")
+	}
+	if len(l.nets) != 1 {
+		t.Fatalf("nets = %d, want 1", len(l.nets))
+	}
+}
+
+func TestTickCost(t *testing.T) {
+	l, c, r := newTest(200000)
+	for i := 0; i < 200000; i++ {
+		a := netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)})
+		l.Admit(NTP, netip.AddrPortFrom(a, 1), Sample{}, 0, 0)
+	}
+	if len(l.srcs) != 200000 {
+		t.Fatalf("sources = %d", len(l.srcs))
+	}
+	c.t = c.t.Add(30 * time.Second)
+	limit := time.Millisecond
+	if raceEnabled {
+		limit = 20 * time.Millisecond
+	}
+	start := time.Now()
+	l.Tick()
+	if d := time.Since(start); d >= limit {
+		t.Fatalf("Tick with nothing due took %v, want < %v", d, limit)
+	}
+	if len(r.scanner) != 0 || len(l.srcs) != 200000 {
+		t.Fatalf("scanner=%d sources=%d", len(r.scanner), len(l.srcs))
+	}
+}
+
+func TestTickOrderAfterRefresh(t *testing.T) {
+	l, c, r := newTest(1000)
+	l.Admit(NTP, ap("192.0.2.1:1"), Sample{}, 1, 48)
+	c.t = c.t.Add(time.Second)
+	l.Admit(NTP, ap("192.0.2.2:1"), Sample{}, 1, 48)
+	c.t = c.t.Add(5 * time.Minute)
+	l.Admit(NTP, ap("192.0.2.1:1"), Sample{}, 1, 48)
+	c.t = c.t.Add(5 * time.Minute)
+	l.Tick()
+	if len(l.srcs) != 1 || len(r.scanner) != 2 {
+		t.Fatalf("sources=%d scanner=%d, want 1/2", len(l.srcs), len(r.scanner))
+	}
+	if _, ok := l.srcs[srcKey{NTP, netip.MustParseAddr("192.0.2.1"), false}]; !ok {
+		t.Fatal("refreshed source expired")
+	}
+	c.t = c.t.Add(5 * time.Minute)
+	l.Tick()
+	if len(l.srcs) != 0 || len(l.nets) != 0 {
+		t.Fatalf("sources=%d nets=%d after the window", len(l.srcs), len(l.nets))
+	}
+}
