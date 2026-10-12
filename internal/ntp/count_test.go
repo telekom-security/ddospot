@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/t3chn0m4g3/ddospot/internal/limit"
-	"github.com/t3chn0m4g3/ddospot/internal/testutil"
+	"github.com/telekom-security/ddospot/internal/limit"
+	"github.com/telekom-security/ddospot/internal/testutil"
 )
 
 // recObs keeps the events of the limiter.

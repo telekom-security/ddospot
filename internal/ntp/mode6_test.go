@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/t3chn0m4g3/ddospot/internal/persona"
+	"github.com/telekom-security/ddospot/internal/persona"
 )
 
 var readvar = []byte{0x16, 0x02, 0x00, 0x07, 0, 0, 0, 0, 0, 0, 0, 0}

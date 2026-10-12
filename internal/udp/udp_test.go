@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/t3chn0m4g3/ddospot/internal/testutil"
+	"github.com/telekom-security/ddospot/internal/testutil"
 )
 
 func TestLoopReturnsAfterClose(t *testing.T) {

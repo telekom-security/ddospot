@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/t3chn0m4g3/ddospot/internal/bucket"
+	"github.com/telekom-security/ddospot/internal/bucket"
 )
 
 const (

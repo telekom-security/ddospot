@@ -7,8 +7,8 @@ import (
 	"encoding/base64"
 	"time"
 
-	"github.com/t3chn0m4g3/ddospot/internal/jsonlog"
-	"github.com/t3chn0m4g3/ddospot/internal/limit"
+	"github.com/telekom-security/ddospot/internal/jsonlog"
+	"github.com/telekom-security/ddospot/internal/limit"
 )
 
 // targets is the log file of the target events.

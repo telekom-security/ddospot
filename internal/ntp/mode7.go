@@ -7,7 +7,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/t3chn0m4g3/ddospot/internal/persona"
+	"github.com/telekom-security/ddospot/internal/persona"
 )
 
 // ntp_request.h.
