@@ -17,9 +17,9 @@ import (
 
 	"github.com/miekg/dns"
 
-	dnspot "github.com/t3chn0m4g3/ddospot/internal/dns"
-	"github.com/t3chn0m4g3/ddospot/internal/jsonlog"
-	"github.com/t3chn0m4g3/ddospot/internal/testutil"
+	dnspot "github.com/telekom-security/ddospot/internal/dns"
+	"github.com/telekom-security/ddospot/internal/jsonlog"
+	"github.com/telekom-security/ddospot/internal/testutil"
 )
 
 var readJSON = testutil.ReadJSON

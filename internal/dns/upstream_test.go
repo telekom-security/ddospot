@@ -14,7 +14,7 @@ import (
 
 	"github.com/miekg/dns"
 
-	"github.com/t3chn0m4g3/ddospot/internal/bucket"
+	"github.com/telekom-security/ddospot/internal/bucket"
 )
 
 func frozen() time.Time { return now }

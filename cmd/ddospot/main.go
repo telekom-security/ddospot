@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/t3chn0m4g3/ddospot/internal/app"
+	"github.com/telekom-security/ddospot/internal/app"
 )
 
 func main() {

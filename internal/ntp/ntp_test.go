@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/t3chn0m4g3/ddospot/internal/persona"
+	"github.com/telekom-security/ddospot/internal/persona"
 )
 
 var now = time.Date(2026, 10, 11, 9, 8, 7, 123456000, time.UTC)

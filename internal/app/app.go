@@ -17,14 +17,14 @@ import (
 
 	"github.com/miekg/dns"
 
-	"github.com/t3chn0m4g3/ddospot/internal/chargen"
-	dnspot "github.com/t3chn0m4g3/ddospot/internal/dns"
-	"github.com/t3chn0m4g3/ddospot/internal/events"
-	"github.com/t3chn0m4g3/ddospot/internal/jsonlog"
-	"github.com/t3chn0m4g3/ddospot/internal/limit"
-	"github.com/t3chn0m4g3/ddospot/internal/ntp"
-	"github.com/t3chn0m4g3/ddospot/internal/persona"
-	"github.com/t3chn0m4g3/ddospot/internal/ssdp"
+	"github.com/telekom-security/ddospot/internal/chargen"
+	dnspot "github.com/telekom-security/ddospot/internal/dns"
+	"github.com/telekom-security/ddospot/internal/events"
+	"github.com/telekom-security/ddospot/internal/jsonlog"
+	"github.com/telekom-security/ddospot/internal/limit"
+	"github.com/telekom-security/ddospot/internal/ntp"
+	"github.com/telekom-security/ddospot/internal/persona"
+	"github.com/telekom-security/ddospot/internal/ssdp"
 )
 
 // Version is the version of the program.

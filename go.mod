@@ -1,4 +1,4 @@
-module github.com/t3chn0m4g3/ddospot
+module github.com/telekom-security/ddospot
 
 go 1.26
 

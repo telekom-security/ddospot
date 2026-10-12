@@ -11,7 +11,7 @@ import (
 
 	"github.com/miekg/dns"
 
-	"github.com/t3chn0m4g3/ddospot/internal/limit"
+	"github.com/telekom-security/ddospot/internal/limit"
 )
 
 // UDPPair returns a UDP socket listening on 127.0.0.1 and a client socket
