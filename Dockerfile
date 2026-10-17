@@ -2,7 +2,7 @@
 #
 # The builder runs on the build platform and cross-compiles, Go under QEMU
 # emulation crashes
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
 RUN apk --no-cache add ca-certificates
